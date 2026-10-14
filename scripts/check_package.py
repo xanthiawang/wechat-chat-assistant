@@ -13,10 +13,13 @@ PUBLIC_FILES=['README.md','LICENSE','THIRD_PARTY_NOTICES.md','SECURITY.md','pack
 
 
 def files():
-    result=[ROOT/name for name in PUBLIC_FILES if (ROOT/name).exists()]
-    for name in PUBLIC_DIRS:
+    manifest=json.loads((ROOT/'scripts/public_files.json').read_text())
+    result=[]
+    for name in manifest:
         p=ROOT/name
-        if p.exists():result.extend(f for f in p.rglob('*') if f.is_file() and '__pycache__' not in f.parts and f.suffix!='.pyc')
+        if p.is_symlink() or not p.is_file() or not p.resolve().is_relative_to(ROOT):
+            raise RuntimeError('Unsafe or missing release input: '+name)
+        result.append(p)
     return sorted(result)
 
 

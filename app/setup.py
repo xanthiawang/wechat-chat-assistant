@@ -117,6 +117,7 @@ def install():
 def connect():
     if not confirm('接入ChatGPT/Codex订阅：问答和相关聊天文字将发送给OpenAI处理，并消耗订阅额度。不会配置收费API备用通道。'):
         raise RuntimeError('未授权模型连接。')
+    pause_and_invalidate()
     oc('models','auth','login','--provider','openai','--device-code','--set-default')
     oc('channels','login','--channel','openclaw-weixin')
     accounts=[]
@@ -128,7 +129,12 @@ def connect():
             accounts.append((p.stem,data['userId']))
     if len(accounts)!=1:raise RuntimeError('未找到唯一的已认证机器人账户；未猜测主人身份。')
     account,owner=accounts[0]
-    c=config();c.update(account=account,owner=owner);write(CONFIG,c)
+    c=config()
+    changed=c.get('account')!=account or c.get('owner')!=owner
+    if changed:
+        for field in ['key_file','db_root','self_id','original_app_confirmed']:
+            c.pop(field,None)
+    c.update(account=account,owner=owner);write(CONFIG,c)
     print('扫码账户已保存到本机。请在微信助手会话发一条“你好”，建立当前对话通道。')
     input('已发送后按回车继续：')
 
@@ -150,6 +156,7 @@ def reader():
         return
     if subprocess.run(['pgrep','-x','WeChat'],capture_output=True).returncode==0:
         raise RuntimeError('微信仍在运行；请从菜单正常退出后重试 reader。')
+    pause_and_invalidate(reader=True)
     c=config();c.update(db_root=str(root),self_id=self_id);write(CONFIG,c)
     state=BASE/('private-reader-'+datetime.now().strftime('%Y%m%d-%H%M%S'))
     run([sys.executable,BASE/'app/bootstrap_local_reader.py','--confirm-temporary-copy','--state-dir',state])
@@ -162,6 +169,7 @@ def reader():
 def verify():
     c=config()
     if not c.get('original_app_confirmed'):raise RuntimeError('尚未完成原版微信可用性确认。')
+    pause_and_invalidate()
     sys.path.insert(0,str(BASE/'app/vendor'))
     from sqlcipher_probe import verify as verify_db, DB, load_key
     root=Path(c['db_root']);keys=Path(c['key_file']);paths=sorted(root.rglob('*.db'))
@@ -180,8 +188,9 @@ def verify():
 
 def activate():
     c=config()
-    if not all(c.get(k) for k in ['reader_verified','owner','account','key_file']):
+    if not all(c.get(k) for k in ['reader_verified','original_app_confirmed','owner','account','key_file']):
         raise RuntimeError('缺少真实读取或认证身份。')
+    verify()
     oc('plugins','install',str(BASE/'plugin'),'--force')
     oc('config','unset','tools.deny')
     oc('config','set','tools.allow','["wechat_history"]')
@@ -210,8 +219,7 @@ def activate():
     folder=BASE/'reports'/day
     if json.loads((folder/'status.json').read_text()).get('status')!='sent':
         raise RuntimeError('完整简报尚未确认发送；不启用定时任务。')
-    archive=folder.with_name(day+'-initial-test-'+datetime.now().strftime('%H%M%S'))
-    folder.rename(archive)
+    # Preserve the canonical sent-day receipt even for trial runs.
     job=oc('cron','add','--name','微信每日简报','--declaration-key','wechat-chat-assistant:daily',
        '--description','每天北京时间09:00开始整理前一天本机同步的文字聊天并发送给主人',
        '--cron','0 9 * * *','--tz','Asia/Shanghai','--exact','--disabled',
@@ -222,6 +230,18 @@ def activate():
     with (BASE/'workspace/SOUL.md').open('a') as f:
         f.write('\n安装向导已完成真实读取、模型检索和完整简报试发。09:00任务已配置并启用（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
     print('真实检索和完整试发已通过。每天北京时间09:00开始生成并推送。Mac必须开机联网。')
+
+
+def pause_and_invalidate(reader=False):
+    c=config()
+    if c.get('daily_job_id'):
+        oc('cron','disable',c['daily_job_id'])
+    oc('config','set','tools.deny','["*"]')
+    c['reader_verified']=False
+    if reader:
+        c.pop('original_app_confirmed',None)
+        c.pop('key_file',None)
+    write(CONFIG,c)
 
 
 def doctor():

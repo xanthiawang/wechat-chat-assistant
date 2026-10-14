@@ -16,7 +16,11 @@ def main():
     paths=files()
     tgz=out/(PREFIX+'.tgz');zip_path=out/(PREFIX+'.zip')
     with tarfile.open(tgz,'w:gz') as archive:
-        for p in paths:archive.add(p,arcname=PREFIX+'/'+str(p.relative_to(ROOT)))
+        for p in paths:
+            info=archive.gettarinfo(str(p),arcname=PREFIX+'/'+str(p.relative_to(ROOT)))
+            info.uid=info.gid=0
+            info.uname=info.gname=''
+            with p.open('rb') as stream:archive.addfile(info,stream)
     with zipfile.ZipFile(zip_path,'w',compression=zipfile.ZIP_DEFLATED) as archive:
         for p in paths:archive.write(p,arcname=PREFIX+'/'+str(p.relative_to(ROOT)))
     digest=hashlib.sha256(tgz.read_bytes()).hexdigest()
