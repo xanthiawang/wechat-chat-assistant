@@ -100,11 +100,16 @@ def install():
             raise RuntimeError('仅支持不含账户密码的HTTP/HTTPS代理URL。')
         env.update(HTTP_PROXY=proxy,HTTPS_PROXY=proxy,NODE_USE_ENV_PROXY='1',NO_PROXY='localhost,127.0.0.1,::1,.weixin.qq.com,.weixin.qq.com.cn,.wechat.com')
     write(STATE/'openclaw.json',{'gateway':{'mode':'local','port':port,'bind':'loopback','auth':{'mode':'token','token':secrets.token_urlsafe(32)}},
-       'agents':{'defaults':{'workspace':str(workspace),'heartbeat':{'every':'0m'}}},'session':{'dmScope':'per-account-channel-peer'},'tools':{'deny':['*']},'env':{'vars':env}})
+       'agents':{'defaults':{'workspace':str(workspace),'heartbeat':{'every':'0m'}}},'session':{'dmScope':'per-account-channel-peer'},'plugins':{'slots':{'memory':'none'}},'tools':{'deny':['*']},'env':{'vars':env}})
     # Install from the lockfile-controlled packages, never a mutable latest tag.
     oc('plugins','install',str(BASE/'runtime/node_modules/@tencent-weixin/openclaw-weixin'),'--force')
     oc('plugins','install',str(BASE/'runtime/node_modules/@openclaw/codex'),'--force')
     oc('gateway','install','--port',str(port),'--runtime-path',c['node'])
+    # A brand-new isolated profile belongs exclusively to this installer.
+    # Disable dependency-generated background model jobs before authorization.
+    for job in oc('cron','list','--json',capture=True).get('jobs',[]):
+        if job.get('enabled'):
+            oc('cron','disable',job['id'])
     connect()
     if confirm('现在初始化本人微信聊天读取？会使用临时重签名副本，必须先保存草稿并完成微信官方备份。'):
         reader()
