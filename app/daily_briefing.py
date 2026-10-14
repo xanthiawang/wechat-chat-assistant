@@ -9,12 +9,16 @@ from pathlib import Path
 import subprocess
 import sys
 from zoneinfo import ZoneInfo
-from history_reader import read, private_write, BASE
+from history_reader import read, private_write, BASE, binding_fingerprint
 
 CONFIG = json.loads((BASE/'reader-config.json').read_text())
 CLI = Path(CONFIG['cli'])
 PROFILE = CONFIG['profile']
 TZ = ZoneInfo('Asia/Shanghai')
+
+
+def report_folder(day):
+    return BASE/'reports'/binding_fingerprint(CONFIG)/day
 
 
 def cli(args, timeout=900):
@@ -50,10 +54,14 @@ def main():
     ap.add_argument('--day')
     args=ap.parse_args()
     day=args.day or (datetime.now(TZ)-timedelta(days=1)).strftime('%Y-%m-%d')
-    folder=BASE/'reports'/day
+    binding=binding_fingerprint(CONFIG)
+    folder=report_folder(day)
     folder.mkdir(mode=0o700,parents=True,exist_ok=True)
     with (BASE/'briefing.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        current=json.loads((BASE/'reader-config.json').read_text())
+        if not current.get('reader_verified') or not current.get('original_app_confirmed') or binding_fingerprint(current)!=binding:
+            raise RuntimeError('Account verification changed; no briefing processed or sent')
         state_path=folder/'status.json'
         state=json.loads(state_path.read_text()) if state_path.exists() else {}
         if state.get('status') in ('sent','delivery_pending','delivery_unknown'):
@@ -62,7 +70,7 @@ def main():
         source=read(day=day,full=True)
         private_write(folder/'source.json',source)
         metadata={k:v for k,v in source.items() if k not in ('records','ledger')}
-        private_write(state_path,{'day':day,'status':'summarizing','coverage':metadata})
+        private_write(state_path,{'day':day,'binding':binding,'status':'summarizing','coverage':metadata})
         batches=[];current=[];size=0
         for r in source['records']:
             # Every text character is included, including unusually long messages.
@@ -89,16 +97,18 @@ def main():
             raise RuntimeError('Briefing exceeds one-message delivery budget; preserved for review')
         (folder/'briefing.txt').write_text(final)
         config=json.loads((BASE/'reader-config.json').read_text())
-        private_write(state_path,{'day':day,'status':'delivery_pending','coverage':metadata,'batches':len(batches)})
+        if binding_fingerprint(config)!=binding:
+            raise RuntimeError('Account binding changed before delivery; nothing sent')
+        private_write(state_path,{'day':day,'binding':binding,'status':'delivery_pending','coverage':metadata,'batches':len(batches)})
         try:
             sent=cli(['message','send','--channel','openclaw-weixin','--account',config['account'],'--target',config['owner'],'--message',final,'--json'],timeout=120)
             private_write(folder/'delivery.json',sent)
             if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':
                 raise RuntimeError('Delivery unconfirmed')
         except Exception:
-            private_write(state_path,{'day':day,'status':'delivery_unknown','coverage':metadata,'batches':len(batches)})
+            private_write(state_path,{'day':day,'binding':binding,'status':'delivery_unknown','coverage':metadata,'batches':len(batches)})
             raise
-        private_write(state_path,{'day':day,'status':'sent','sent_at':datetime.now(TZ).isoformat(),'coverage':metadata,'batches':len(batches)})
+        private_write(state_path,{'day':day,'binding':binding,'status':'sent','sent_at':datetime.now(TZ).isoformat(),'coverage':metadata,'batches':len(batches)})
         print(json.dumps({'day':day,'status':'sent','text_messages_processed':source['read_text'],'nontext_or_unreadable':source['omitted'],'batches':len(batches)}),flush=True)
 
 

@@ -100,7 +100,7 @@ def install():
             raise RuntimeError('仅支持不含账户密码的HTTP/HTTPS代理URL。')
         env.update(HTTP_PROXY=proxy,HTTPS_PROXY=proxy,NODE_USE_ENV_PROXY='1',NO_PROXY='localhost,127.0.0.1,::1,.weixin.qq.com,.weixin.qq.com.cn,.wechat.com')
     write(STATE/'openclaw.json',{'gateway':{'mode':'local','port':port,'bind':'loopback','auth':{'mode':'token','token':secrets.token_urlsafe(32)}},
-       'agents':{'defaults':{'workspace':str(workspace),'heartbeat':{'every':'0m'}}},'tools':{'deny':['*']},'env':{'vars':env}})
+       'agents':{'defaults':{'workspace':str(workspace),'heartbeat':{'every':'0m'}}},'session':{'dmScope':'per-account-channel-peer'},'tools':{'deny':['*']},'env':{'vars':env}})
     # Install from the lockfile-controlled packages, never a mutable latest tag.
     oc('plugins','install',str(BASE/'runtime/node_modules/@tencent-weixin/openclaw-weixin'),'--force')
     oc('plugins','install',str(BASE/'runtime/node_modules/@openclaw/codex'),'--force')
@@ -209,15 +209,17 @@ def activate():
             completed=[json.loads(line) for line in f.read().splitlines() if line]
     if tested.get('status')!='ok' or not tested.get('result',{}).get('deliverySucceeded') or not any('records' in r and r.get('allowed') for r in completed):
         raise RuntimeError('模型工具或主人通道未验证；未启用定时任务。')
-    from daily_briefing import main as brief
+    from daily_briefing import main as brief, report_folder
     saved=sys.argv;sys.argv=['daily_briefing.py']
     try:brief()
     finally:sys.argv=saved
     from datetime import timedelta
     from zoneinfo import ZoneInfo
     day=(datetime.now(ZoneInfo('Asia/Shanghai'))-timedelta(days=1)).strftime('%Y-%m-%d')
-    folder=BASE/'reports'/day
-    if json.loads((folder/'status.json').read_text()).get('status')!='sent':
+    from history_reader import binding_fingerprint
+    folder=report_folder(day)
+    receipt=json.loads((folder/'status.json').read_text())
+    if receipt.get('status')!='sent' or receipt.get('binding')!=binding_fingerprint(config()):
         raise RuntimeError('完整简报尚未确认发送；不启用定时任务。')
     # Preserve the canonical sent-day receipt even for trial runs.
     job=oc('cron','add','--name','微信每日简报','--declaration-key','wechat-chat-assistant:daily',
@@ -233,15 +235,21 @@ def activate():
 
 
 def pause_and_invalidate(reader=False):
-    c=config()
-    if c.get('daily_job_id'):
-        oc('cron','disable',c['daily_job_id'])
-    oc('config','set','tools.deny','["*"]')
-    c['reader_verified']=False
-    if reader:
-        c.pop('original_app_confirmed',None)
-        c.pop('key_file',None)
-    write(CONFIG,c)
+    import fcntl
+    with (BASE/'briefing.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('简报正在处理；先等待它结束，再重新授权或初始化，避免中途切换账户。')
+        c=config()
+        if c.get('daily_job_id'):
+            oc('cron','disable',c['daily_job_id'])
+        oc('config','set','tools.deny','["*"]')
+        c['reader_verified']=False
+        if reader:
+            c.pop('original_app_confirmed',None)
+            c.pop('key_file',None)
+        write(CONFIG,c)
 
 
 def doctor():

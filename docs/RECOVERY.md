@@ -35,9 +35,11 @@
 
 ## 简报发送不确定
 
-`reports/<日期>/status.json` 若为 `delivery_pending` 或 `delivery_unknown`，
+`reports/<账号绑定哈希>/<日期>/status.json` 若为 `delivery_pending` 或 `delivery_unknown`，
 不要盲目重发。先查看本人微信是否收到，再由本人决定是否重试。
 已确认发送的日期有去重标记。模型失败或数据缺失时不发送成功简报。
+账号绑定包含机器人账号、认证主人、本地微信ID和数据目录。更换账号不能复用
+旧账号的已发送回执；处理中的简报完成前，向导不会改变绑定配置。
 
 ## 更新与卸载
 
