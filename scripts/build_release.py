@@ -42,8 +42,8 @@ actual="$(shasum -a 256 "$tmp/package.tgz" | cut -d ' ' -f 1)"
 tar -tzf "$tmp/package.tgz" | while IFS= read -r member; do
   [[ "$member" == wechat-chat-assistant-vVERSION/* && "$member" != *../* ]] || exit 1
 done
-tar -xzf "$tmp/package.tgz" -C "$base/packages"
-mv "$base/packages/wechat-chat-assistant-vVERSION" "$target"
+tar -xzf "$tmp/package.tgz" -C "$tmp"
+mv "$tmp/wechat-chat-assistant-vVERSION" "$target"
 exec /bin/bash "$target/Install.command"
 '''.replace('VERSION',VERSION).replace('DIGEST',digest))
     bootstrap.chmod(0o755)

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from zoneinfo import ZoneInfo
 from history_reader import read, private_write, BASE, binding_fingerprint
 
@@ -38,7 +39,8 @@ def cli(args, timeout=900):
 def model(prompt, key, folder):
     file = folder/(key+'.prompt.txt')
     file.write_text(prompt)
-    result = cli(['agent','--session-key','agent:main:wechat-digest-'+key,'--message-file',str(file),'--thinking','low','--timeout','800','--json'])
+    session_key='agent:main:wechat-digest-'+binding_fingerprint(CONFIG)+'-'+key+'-'+uuid.uuid4().hex
+    result = cli(['agent','--session-key',session_key,'--message-file',str(file),'--thinking','low','--timeout','800','--json'])
     private_write(folder/(key+'.result.json'),result)
     if result.get('status')!='ok':
         raise RuntimeError('Model did not complete; no briefing delivered')
