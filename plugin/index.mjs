@@ -9,6 +9,30 @@ export default {
   id: 'wechat-local-history',
   name: 'Local WeChat history',
   register(api) {
+    api.registerTool(ctx => ({
+      name:'wechat_memory',
+      description:'Private local sourced memory. sync incrementally refreshes actual messages; profile retrieves recipient-specific self-sent examples and observed edits; search retrieves sourced relationship candidates; draft records an immutable generated draft before showing it; feedback links draft_id to a later changed actual self-sent source in same chat, never assume authorship or approval; remember stores only sourced relationship candidates. No sending. Cached evidence may be stale: check live history before relying on it.',
+      parameters:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:['sync','stats','profile','search','draft','feedback','remember']},recipient:{type:'string',maxLength:200},target:{type:'string',maxLength:200},query:{type:'string',maxLength:200},text:{type:'string',maxLength:500},relation:{type:'string',maxLength:60},sources:{type:'array',minItems:1,maxItems:10,items:{type:'string',maxLength:200}},source:{type:'string',maxLength:200},draft_id:{type:'string',pattern:'^[a-f0-9]{16}$'},limit:{type:'integer',minimum:1,maximum:30}},required:['action']},
+      async execute(_id,params){
+        const c=JSON.parse(readFileSync(join(base,'reader-config.json'),'utf8'));
+        const n=x=>String(x||'').toLowerCase(),r=ctx.deliveryContext||{};
+        const authorized=()=>{
+          const now=JSON.parse(readFileSync(join(base,'reader-config.json'),'utf8'));
+          return now.reader_verified && now.original_app_confirmed && ['owner','account','self_id','db_root','key_file'].every(k=>now[k]===c[k]) &&
+            (!ctx.requesterSenderId||n(ctx.requesterSenderId)===n(c.owner)) &&
+            ((n(r.channel)==='openclaw-weixin'&&n(r.to)===n(c.owner)&&n(r.accountId)===n(c.account))||n(ctx.sessionKey)===`agent:main:openclaw-weixin:${n(c.account)}:direct:${n(c.owner)}`);
+        };
+        if(!authorized())throw Error('Verified current owner conversation required.');
+        const script=join(base,'app','local_memory.py');
+        const {stdout}=await new Promise((resolve,reject)=>{
+          const binding=Object.fromEntries(['owner','account','self_id','db_root','key_file'].map(k=>[k,c[k]]));
+          const child=execFile(c.python,[script],{env:{...process.env,WECHAT_ASSISTANT_HOME:base,WECHAT_MEMORY_BINDING:JSON.stringify(binding)},timeout:90000,maxBuffer:200000},(err,stdout,stderr)=>err?reject(Error('Local memory operation failed; inspect private logs.')):resolve({stdout}));
+          child.stdin.end(JSON.stringify(params));
+        });
+        if(!authorized())throw Error('Owner binding changed during memory operation.');
+        ctx.assertActive?.();const details=JSON.parse(stdout);return {content:[{type:'text',text:stdout}],details};
+      }
+    }),{name:'wechat_memory',optional:true});
     api.registerTool((ctx) => {
       const config = JSON.parse(readFileSync(join(base,'reader-config.json'),'utf8'));
       const norm = x => String(x || '').toLowerCase();

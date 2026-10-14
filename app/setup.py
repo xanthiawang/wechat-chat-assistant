@@ -198,7 +198,7 @@ def activate():
     verify()
     oc('plugins','install',str(BASE/'plugin'),'--force')
     oc('config','unset','tools.deny')
-    oc('config','set','tools.allow','["wechat_history"]')
+    oc('config','set','tools.allow','["wechat_history","wechat_memory"]')
     oc('gateway','restart')
     oc('gateway','call','sessions.reset','--params',json.dumps({'key':'agent:main:main','reason':'new'}),'--json',capture=True)
     # Prove the actual subscription runtime invokes the owner-only tool.

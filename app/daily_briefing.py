@@ -70,6 +70,10 @@ def main():
             print(json.dumps({'day':day,'status':state['status'],'duplicate_suppressed':True}))
             return
         source=read(day=day,full=True)
+        from memory_refresh import refresh
+        try:refresh()
+        except Exception as error:
+            print(json.dumps({'memory_refresh':'failed','error_type':type(error).__name__,'briefing_continues':True}),flush=True)
         private_write(folder/'source.json',source)
         metadata={k:v for k,v in source.items() if k not in ('records','ledger')}
         private_write(state_path,{'day':day,'binding':binding,'status':'summarizing','coverage':metadata})
