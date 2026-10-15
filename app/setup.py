@@ -77,7 +77,7 @@ def configure_schedules(brief_script=None):
     install('preparation_job_id','微信晨报提前准备','wechat-chat-assistant:prepare','40 8 * * *',
         [c['python'],str(brief_script),'--prepare'],1000)
     install('daily_job_id','微信每日简报',daily_key,'0 9 * * *',
-        [c['python'],str(brief_script),'--deliver-ready'],120)
+        [c['python'],str(brief_script),'--deliver-ready'],300)
     install('learning_job_id','微信语气与关系学习','wechat-chat-assistant:learning','30 5,11,17,23 * * *',
         [c['python'],str(BASE/'app/memory_refresh.py')],300)
     for key in ['preparation_job_id','daily_job_id']:

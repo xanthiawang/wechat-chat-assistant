@@ -101,6 +101,65 @@ def deliver_ready(day, folder, state, binding):
     print(json.dumps({'day':day,'status':'sent','batches':state['batches']}),flush=True)
 
 
+def deliver_tasks(day,folder,binding):
+    """One immutable delivery-time task snapshot; no model or history sync."""
+    from local_memory import connect,config,fingerprint,task_record
+    current=config()
+    if binding_fingerprint(current)!=binding or not current.get('reader_verified') or not current.get('original_app_confirmed'):
+        raise RuntimeError('Task reminder owner verification changed')
+    path=folder/'task-reminder.json'
+    if path.exists():
+        journal=json.loads(path.read_text())
+        if journal['binding']!=binding or journal['day']!=day:raise RuntimeError('Task reminder binding differs')
+    else:
+        db=connect(current,timeout=2)
+        try:tasks=[task_record(r) for r in db.execute("SELECT * FROM tasks WHERE status='open' ORDER BY number")]
+        finally:db.close()
+        snapshot_at=datetime.now(TZ).isoformat();pages=[];lines=[];size=0
+        labels={'self':'我来做','followup':'等对方推进','confirm':'待确认'}
+        for task in tasks:
+            line=f'□ {task["id"]} [{labels[task["category"]]}] {task["title"]}'
+            due=task['due_original']
+            if due and due not in ('未定日期','未明确日期'):line+='（'+due+'）'
+            if len(line)>2800:raise RuntimeError('Task line exceeds delivery size')
+            if lines and size+len(line)>2800:pages.append('\n'.join(lines));lines=[];size=0
+            lines.append(line);size+=len(line)+1
+        if lines:pages.append('\n'.join(lines))
+        header=f'待办提醒 · {datetime.now(TZ):%m月%d日}\n截至{snapshot_at[11:16]}，本机待办{len(tasks)}项。导入时完成情况未核对；相对日期为会议原话，日期待确认。\n'
+        footer='\n完成请发“完成 T001”（替换编号），或 /todo done T001。可说“查看已完成待办”；恢复请发“恢复 T001”。'
+        journal={'binding':binding,'day':day,'snapshot_at':snapshot_at,'memory_binding':fingerprint(current),'tasks':tasks,
+                 'pages':[{'text':header+f'第{i+1}/{len(pages)}页\n'+page+footer,'status':'unsent'} for i,page in enumerate(pages)]}
+        for page in journal['pages']:page['sha256']=hashlib.sha256(page['text'].encode()).hexdigest()
+        private_write(path,journal)
+    for i,page in enumerate(journal['pages']):
+        if page['status']=='sent':continue
+        if page['status']!='unsent':raise RuntimeError('Task reminder delivery uncertain; no automatic retry')
+        current=config()
+        if binding_fingerprint(current)!=binding or not current.get('reader_verified') or not current.get('original_app_confirmed'):raise RuntimeError('Task owner changed before sending')
+        if hashlib.sha256(page['text'].encode()).hexdigest()!=page['sha256'] or len(page['text'])>3900:raise RuntimeError('Task page changed or oversized')
+        page['status']='pending';private_write(path,journal)
+        try:
+            sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',page['text'],'--json'],timeout=45)
+            private_write(folder/f'task-delivery-{i+1}.json',sent)
+            if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':raise RuntimeError('Task delivery unconfirmed')
+        except BaseException:page['status']='unknown';private_write(path,journal);raise
+        page['status']='sent';page['sent_at']=datetime.now(TZ).isoformat();private_write(path,journal)
+    phase('task_reminders_confirmed',tasks=len(journal['tasks']),pages=len(journal['pages']))
+
+
+def deliver_scheduled(day,folder,state,binding):
+    if state.get('status') in ('delivery_pending','delivery_unknown'):
+        raise RuntimeError('Brief delivery uncertain; review local receipt before retrying')
+    task_error=None
+    try:deliver_tasks(day,folder,binding)
+    except Exception as error:
+        task_error=error;phase('task_reminders_failed',error_type=type(error).__name__)
+    if state.get('status')=='sent':phase('brief_duplicate_suppressed',day=day)
+    elif state.get('status')=='ready':deliver_ready(day,folder,state,binding)
+    else:raise RuntimeError('Briefing not ready; task reminders processed separately, no generation started')
+    if task_error:raise task_error
+
+
 def main():
     os.umask(0o077)
     ap=argparse.ArgumentParser()
@@ -120,13 +179,14 @@ def main():
             raise RuntimeError('Account verification changed; no briefing processed or sent')
         state_path=folder/'status.json'
         state=json.loads(state_path.read_text()) if state_path.exists() else {}
+        if args.deliver_ready:
+            deliver_scheduled(day,folder,state,binding);return
         if state.get('status') in ('sent','delivery_pending','delivery_unknown'):
             print(json.dumps({'day':day,'status':state['status'],'duplicate_suppressed':True}))
             return
         if state.get('status')=='ready':
             if args.prepare:phase('ready_reused',day=day);return
-            deliver_ready(day,folder,state,binding);return
-        if args.deliver_ready:raise RuntimeError('Briefing not ready; waiting for preparation, no generation started')
+            deliver_scheduled(day,folder,state,binding);return
         private_write(state_path,{'day':day,'binding':binding,'status':'reading'})
         phase('reading_started', day=day)
         source=read(day=day,full=True)
@@ -165,7 +225,7 @@ def main():
             'briefing_sha256':hashlib.sha256(final.encode()).hexdigest(),'coverage':metadata,'batches':len(batches)}
         private_write(state_path,state);phase('ready',day=day,batches=len(batches))
         if args.prepare:return
-        deliver_ready(day,folder,state,binding)
+        deliver_scheduled(day,folder,state,binding)
 
 
 if __name__=='__main__':
