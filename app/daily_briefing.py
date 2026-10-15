@@ -3,6 +3,8 @@
 import argparse
 from datetime import datetime,timedelta
 import fcntl
+import hashlib
+import signal
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,7 @@ CLI = Path(CONFIG['cli'])
 PROFILE = CONFIG['profile']
 TZ = ZoneInfo('Asia/Shanghai')
 STARTED = time.monotonic()
+sys.path.insert(0,str(BASE/'app'))
 
 
 def phase(name, **fields):
@@ -48,7 +51,22 @@ def model(prompt, key, folder):
     file = folder/(key+'.prompt.txt')
     file.write_text(prompt)
     session_key='agent:main:wechat-digest-'+binding_fingerprint(CONFIG)+'-'+key+'-'+uuid.uuid4().hex
-    result = cli(['agent','--session-key',session_key,'--message-file',str(file),'--thinking','low','--timeout','800','--json'])
+    from memory_refresh import cancel_model
+    process=subprocess.Popen([CONFIG['node'],str(CLI),'--profile',PROFILE,'agent','--session-key',session_key,'--message-file',str(file),'--thinking','low','--timeout','180','--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    def stopped(*_):raise TimeoutError('Preparation stopped')
+    prior=signal.signal(signal.SIGTERM,stopped)
+    try:
+        stdout,_=process.communicate(timeout=210)
+        if process.returncode:raise RuntimeError('Briefing model failed')
+        result=None
+        for i,ch in enumerate(stdout):
+            if ch=='{':
+                try:result=json.loads(stdout[i:]);break
+                except ValueError:continue
+        if result is None:raise RuntimeError('Model returned no JSON result')
+    except BaseException:
+        cancel_model(process,CONFIG,session_key);raise
+    finally:signal.signal(signal.SIGTERM,prior)
     private_write(folder/(key+'.result.json'),result)
     if result.get('status')!='ok':
         raise RuntimeError('Model did not complete; no briefing delivered')
@@ -59,10 +77,37 @@ def model(prompt, key, folder):
     return text
 
 
+def deliver_ready(day, folder, state, binding):
+    current=json.loads((BASE/'reader-config.json').read_text())
+    if not current.get('reader_verified') or not current.get('original_app_confirmed') or binding_fingerprint(current)!=binding:
+        raise RuntimeError('Account verification changed before delivery')
+    if state.get('status')!='ready' or state.get('day')!=day or state.get('binding')!=binding:
+        raise RuntimeError('Briefing not ready; delivery-only task will not generate or guess content')
+    final=(folder/'briefing.txt').read_text()
+    if hashlib.sha256(final.encode()).hexdigest()!=state.get('briefing_sha256'):
+        raise RuntimeError('Prepared briefing changed; no message sent')
+    if not final or len(final)>3900:raise RuntimeError('Prepared message size invalid')
+    state_path=folder/'status.json'
+    state={**state,'status':'delivery_pending'};private_write(state_path,state)
+    phase('delivery_started',day=day)
+    try:
+        sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',final,'--json'],timeout=60)
+        private_write(folder/'delivery.json',sent)
+        if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':raise RuntimeError('Delivery unconfirmed')
+    except BaseException:
+        private_write(state_path,{**state,'status':'delivery_unknown'});raise
+    private_write(state_path,{**state,'status':'sent','sent_at':datetime.now(TZ).isoformat()})
+    phase('delivery_confirmed',day=day)
+    print(json.dumps({'day':day,'status':'sent','batches':state['batches']}),flush=True)
+
+
 def main():
     os.umask(0o077)
     ap=argparse.ArgumentParser()
     ap.add_argument('--day')
+    mode=ap.add_mutually_exclusive_group()
+    mode.add_argument('--prepare',action='store_true')
+    mode.add_argument('--deliver-ready',action='store_true')
     args=ap.parse_args()
     day=args.day or (datetime.now(TZ)-timedelta(days=1)).strftime('%Y-%m-%d')
     binding=binding_fingerprint(CONFIG)
@@ -78,6 +123,10 @@ def main():
         if state.get('status') in ('sent','delivery_pending','delivery_unknown'):
             print(json.dumps({'day':day,'status':state['status'],'duplicate_suppressed':True}))
             return
+        if state.get('status')=='ready':
+            if args.prepare:phase('ready_reused',day=day);return
+            deliver_ready(day,folder,state,binding);return
+        if args.deliver_ready:raise RuntimeError('Briefing not ready; waiting for preparation, no generation started')
         private_write(state_path,{'day':day,'binding':binding,'status':'reading'})
         phase('reading_started', day=day)
         source=read(day=day,full=True)
@@ -110,22 +159,13 @@ def main():
         if len(final)>3900:
             raise RuntimeError('Briefing exceeds one-message delivery budget; preserved for review')
         (folder/'briefing.txt').write_text(final)
-        config=json.loads((BASE/'reader-config.json').read_text())
-        if binding_fingerprint(config)!=binding:
-            raise RuntimeError('Account binding changed before delivery; nothing sent')
-        private_write(state_path,{'day':day,'binding':binding,'status':'delivery_pending','coverage':metadata,'batches':len(batches)})
-        phase('delivery_started', day=day)
-        try:
-            sent=cli(['message','send','--channel','openclaw-weixin','--account',config['account'],'--target',config['owner'],'--message',final,'--json'],timeout=120)
-            private_write(folder/'delivery.json',sent)
-            if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':
-                raise RuntimeError('Delivery unconfirmed')
-        except Exception:
-            private_write(state_path,{'day':day,'binding':binding,'status':'delivery_unknown','coverage':metadata,'batches':len(batches)})
-            raise
-        private_write(state_path,{'day':day,'binding':binding,'status':'sent','sent_at':datetime.now(TZ).isoformat(),'coverage':metadata,'batches':len(batches)})
-        phase('delivery_confirmed', day=day)
-        print(json.dumps({'day':day,'status':'sent','text_messages_processed':source['read_text'],'nontext_or_unreadable':source['omitted'],'batches':len(batches)}),flush=True)
+        current=json.loads((BASE/'reader-config.json').read_text())
+        if binding_fingerprint(current)!=binding:raise RuntimeError('Account binding changed during preparation')
+        state={'day':day,'binding':binding,'status':'ready','prepared_at':datetime.now(TZ).isoformat(),
+            'briefing_sha256':hashlib.sha256(final.encode()).hexdigest(),'coverage':metadata,'batches':len(batches)}
+        private_write(state_path,state);phase('ready',day=day,batches=len(batches))
+        if args.prepare:return
+        deliver_ready(day,folder,state,binding)
 
 
 if __name__=='__main__':

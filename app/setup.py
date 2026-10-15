@@ -60,6 +60,34 @@ def oc(*args,capture=False,timeout=None):
     return run([c['node'],c['cli'],'--profile',c['profile'],*args],capture,timeout)
 
 
+def configure_schedules(brief_script=None):
+    c=config();brief_script=brief_script or BASE/'app/daily_briefing.py'
+    if not c.get('reader_verified') or not c.get('original_app_confirmed'):
+        raise RuntimeError('真实读取和原版微信尚未验证；不启用调度。')
+    existing=oc('cron','list','--json',capture=True)['jobs']
+    def install(field,name,key,expr,argv,seconds):
+        old=next((j for j in existing if j.get('declarationKey')==key or j.get('id')==c.get(field)),None)
+        common=['--name',name,'--cron',expr,'--tz','Asia/Shanghai','--exact',
+            '--command-argv',json.dumps(argv),'--command-cwd',str(BASE/'app'),
+            '--command-env','WECHAT_ASSISTANT_HOME='+str(BASE),'--timeout-seconds',str(seconds),'--no-deliver','--json']
+        if old:job=oc('cron','edit',old['id'],*common,'--disable',capture=True)
+        else:job=oc('cron','add',*common,'--declaration-key',key,'--disabled',capture=True)
+        job=job.get('job',job);c[field]=job['id'];write(CONFIG,c);return job['id']
+    daily_key=next((j.get('declarationKey') or 'wechat-chat-assistant:daily' for j in existing if j.get('id')==c.get('daily_job_id') or j.get('declarationKey')=='zixin-wechat:daily-briefing'),'wechat-chat-assistant:daily')
+    install('preparation_job_id','微信晨报提前准备','wechat-chat-assistant:prepare','40 8 * * *',
+        [c['python'],str(brief_script),'--prepare'],1000)
+    install('daily_job_id','微信每日简报',daily_key,'0 9 * * *',
+        [c['python'],str(brief_script),'--deliver-ready'],120)
+    install('learning_job_id','微信语气与关系学习','wechat-chat-assistant:learning','30 5,11,17,23 * * *',
+        [c['python'],str(BASE/'app/memory_refresh.py')],300)
+    for key in ['preparation_job_id','daily_job_id']:
+        oc('cron','edit',c[key],'--failure-alert','--failure-alert-after','1',
+            '--failure-alert-channel','openclaw-weixin','--failure-alert-account-id',c['account'],
+            '--failure-alert-to',c['owner'],'--failure-alert-cooldown','1h',capture=True)
+    for key in ['preparation_job_id','daily_job_id','learning_job_id']:oc('cron','enable',c[key],capture=True)
+    return {k:c[k] for k in ['preparation_job_id','daily_job_id','learning_job_id']}
+
+
 def install():
     if platform.system()!='Darwin' or platform.machine()!='arm64':
         raise RuntimeError('Beta仅支持Apple Silicon macOS；请不要用Rosetta运行。')
@@ -227,16 +255,10 @@ def activate():
     if receipt.get('status')!='sent' or receipt.get('binding')!=binding_fingerprint(config()):
         raise RuntimeError('完整简报尚未确认发送；不启用定时任务。')
     # Preserve the canonical sent-day receipt even for trial runs.
-    job=oc('cron','add','--name','微信每日简报','--declaration-key','wechat-chat-assistant:daily',
-       '--description','每天北京时间09:00开始整理前一天本机同步的文字聊天并发送给主人',
-       '--cron','0 9 * * *','--tz','Asia/Shanghai','--exact','--disabled',
-       '--command-argv',json.dumps([c['python'],str(BASE/'app/daily_briefing.py')]),
-       '--command-cwd',str(BASE/'app'),'--timeout-seconds','3600','--no-deliver','--json',capture=True)
-    job=job.get('job',job);oc('cron','enable',job['id'])
-    c['daily_job_id']=job['id'];write(CONFIG,c)
+    configure_schedules()
     with (BASE/'workspace/SOUL.md').open('a') as f:
-        f.write('\n安装向导已完成真实读取、模型检索和完整简报试发。09:00任务已配置并启用（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
-    print('真实检索和完整试发已通过。每天北京时间09:00开始生成并推送。Mac必须开机联网。')
+        f.write('\n真实读取、模型检索和完整简报试发已验证。08:40准备晨报、09:00尝试投递；学习独立运行（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
+    print('真实检索和完整试发已通过。08:40提前准备，09:00投递；学习独立运行。Mac必须开机联网。')
 
 
 def pause_and_invalidate(reader=False):
@@ -247,8 +269,8 @@ def pause_and_invalidate(reader=False):
         except BlockingIOError:
             raise RuntimeError('简报正在处理；先等待它结束，再重新授权或初始化，避免中途切换账户。')
         c=config()
-        if c.get('daily_job_id'):
-            oc('cron','disable',c['daily_job_id'])
+        for key in ['daily_job_id','preparation_job_id','learning_job_id']:
+            if c.get(key):oc('cron','disable',c[key])
         oc('config','set','tools.deny','["*"]')
         c['reader_verified']=False
         if reader:
@@ -270,7 +292,8 @@ def uninstall():
     if not confirm('停止并卸载此独立profile的后台服务；保留本机聊天、密钥、配置和订阅登录文件，绝不自动删除个人数据。'):
         return
     c=config()
-    if c.get('daily_job_id'):oc('cron','disable',c['daily_job_id'])
+    for key in ['daily_job_id','preparation_job_id','learning_job_id']:
+        if c.get(key):oc('cron','disable',c[key])
     oc('gateway','uninstall')
     print('服务已停止。本机个人数据保留在 '+str(BASE)+' 和 '+str(STATE))
 
