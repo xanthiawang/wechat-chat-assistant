@@ -170,20 +170,68 @@ def report_folder(day):
     return BASE/'reports'/binding_fingerprint(CONFIG)/day
 
 
-def cli(args, timeout=900):
-    proc = subprocess.run([CONFIG['node'],str(CLI),'--profile',PROFILE,*args],capture_output=True,text=True,timeout=timeout)
-    if proc.returncode:
+class DeliveryCommandError(RuntimeError):
+    def __init__(self,message,status,receipt_path):
+        super().__init__(message)
+        self.delivery_status=status
+        self.receipt_path=str(receipt_path)
+
+
+def decode_cli_result(stdout):
+    for index,char in enumerate(stdout):
+        if char=='{':
+            try:return json.loads(stdout[index:])
+            except json.JSONDecodeError:continue
+    return None
+
+
+def owner_gateway_request(args,timeout,idempotency_key):
+    if args[:2]!=['message','send']:return None
+    def value(flag):
+        if args.count(flag)!=1:raise ValueError('Explicit unique owner send options required')
+        index=args.index(flag)
+        if index+1>=len(args):raise ValueError('Owner send option missing a value')
+        return args[index+1]
+    current=json.loads((BASE/'reader-config.json').read_text())
+    if (not current.get('reader_verified') or not current.get('original_app_confirmed')
+        or binding_fingerprint(current)!=binding_fingerprint(CONFIG)
+        or value('--channel')!='openclaw-weixin' or value('--account')!=current['account'] or value('--target')!=current['owner']):
+        raise ValueError('Only verified owner-bound WeChat sends are supported')
+    if not idempotency_key:raise ValueError('Persist a delivery idempotency key before sending')
+    body=value('--message')
+    if set(args)-{'message','send','--channel','--account','--target','--message','--json',current['account'],current['owner'],'openclaw-weixin',body}:
+        raise ValueError('Unsupported owner message option')
+    params={'channel':'openclaw-weixin','action':'send','accountId':current['account'],
+            'params':{'target':current['owner'],'message':body,'accountId':current['account']},'idempotencyKey':idempotency_key}
+    return ['gateway','call','message.action','--params',json.dumps(params,ensure_ascii=False),
+            '--timeout',str(max(1000,int((timeout-5)*1000))),'--json']
+
+
+def cli(args, timeout=900, idempotency_key=None):
+    gateway_args=owner_gateway_request(args,timeout,idempotency_key)
+    command=gateway_args or args
+    proc=subprocess.run([CONFIG['node'],str(CLI),'--profile',PROFILE,*command],capture_output=True,text=True,timeout=timeout)
+    result=decode_cli_result(proc.stdout)
+    if proc.returncode or result is None or result.get('ok') is False:
         diagnostic=BASE/'diagnostics'/('command-'+uuid.uuid4().hex+'.json')
-        private_write(diagnostic,{'at':datetime.now(TZ).isoformat(),'exit_code':proc.returncode,'stdout':proc.stdout,'stderr':proc.stderr})
+        private_write(diagnostic,{'at':datetime.now(TZ).isoformat(),'exit_code':proc.returncode,
+            'transport':'gateway-rpc' if gateway_args else 'cli','idempotency_key':idempotency_key,
+            'stdout':proc.stdout,'stderr':proc.stderr})
+        if gateway_args:
+            code=(result or {}).get('error',{}).get('details',{}).get('code')
+            payload=(result or {}).get('payload',{})
+            status='queued' if code=='OUTBOUND_DELIVERY_QUEUED' else payload.get('deliveryStatus','unknown')
+            if status not in ('failed','queued','suppressed'):status='unknown'
+            raise DeliveryCommandError('WeChat delivery '+status+'; private receipt: '+diagnostic.name,status,diagnostic)
         raise RuntimeError(f'OpenClaw command failed ({proc.returncode}); private diagnostic: {diagnostic.name}')
-    # CLI's machine output can follow non-JSON diagnostic lines.
-    for i,c in enumerate(proc.stdout):
-        if c=='{':
-            try:
-                return json.loads(proc.stdout[i:])
-            except json.JSONDecodeError:
-                continue
-    raise RuntimeError('OpenClaw returned no valid JSON result')
+    if gateway_args:
+        receipt=result.get('payload') if isinstance(result.get('payload'),dict) and 'deliveryStatus' in result['payload'] else result
+        if receipt.get('deliveryStatus')!='sent':
+            diagnostic=BASE/'diagnostics'/('receipt-'+uuid.uuid4().hex+'.json');private_write(diagnostic,result)
+            status=receipt.get('deliveryStatus','unknown')
+            raise DeliveryCommandError('WeChat delivery not confirmed; private receipt: '+diagnostic.name,status if status in ('queued','failed','suppressed') else 'unknown',diagnostic)
+        return {'transport':'gateway-rpc','dryRun':result.get('dryRun',False),'payload':receipt,'gateway_result':result}
+    return result
 
 
 def model(prompt, key, folder):
@@ -236,7 +284,7 @@ def deliver_ready(day, folder, state, binding):
     else:
         legacy=folder/'task-reminder.json'
         prior=json.loads(legacy.read_text()) if legacy.exists() else None
-        if prior and (prior.get('binding')!=binding or any(p['status'] in ('pending','unknown') for p in prior['pages'])):
+        if prior and (prior.get('binding')!=binding or any(p['status'] not in ('unsent','sent') for p in prior['pages'])):
             raise RuntimeError('Earlier task delivery uncertain; review receipts first')
         from local_memory import connect,task_record
         task_error=None;tasks=None
@@ -269,14 +317,17 @@ def deliver_ready(day, folder, state, binding):
             raise RuntimeError('Owner verification changed before narrative page send')
         if hashlib.sha256(page['text'].encode()).hexdigest()!=page['sha256'] or len(page['text'])>3900:
             raise RuntimeError('Narrative page changed or oversized')
+        page.setdefault('idempotency_key','wechat-owner-'+uuid.uuid4().hex)
         page['status']='pending';private_write(path,journal)
         try:
-            sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',page['text'],'--json'],timeout=45)
+            sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',page['text'],'--json'],timeout=45,idempotency_key=page['idempotency_key'])
             private_write(folder/f'narrative-delivery-{index+1}.json',sent)
             if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':raise RuntimeError('Narrative delivery unconfirmed')
-        except BaseException:
-            page['status']='unknown';private_write(path,journal)
-            private_write(state_path,{**state,'status':'delivery_unknown'});raise
+        except BaseException as error:
+            status=getattr(error,'delivery_status','unknown');page['status']=status
+            if hasattr(error,'receipt_path'):page['receipt_path']=error.receipt_path
+            private_write(path,journal)
+            private_write(state_path,{**state,'status':'delivery_'+status});raise
         page['status']='sent';page['sent_at']=datetime.now(TZ).isoformat();private_write(path,journal)
     private_write(state_path,{**state,'status':'sent','sent_at':datetime.now(TZ).isoformat()})
     phase('delivery_confirmed',day=day)
@@ -329,19 +380,23 @@ def deliver_tasks(day,folder,binding):
         current=config()
         if binding_fingerprint(current)!=binding or not current.get('reader_verified') or not current.get('original_app_confirmed'):raise RuntimeError('Task owner changed before sending')
         if hashlib.sha256(page['text'].encode()).hexdigest()!=page['sha256'] or len(page['text'])>3900:raise RuntimeError('Task page changed or oversized')
+        page.setdefault('idempotency_key','wechat-owner-'+uuid.uuid4().hex)
         page['status']='pending';private_write(path,journal)
         try:
-            sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',page['text'],'--json'],timeout=45)
+            sent=cli(['message','send','--channel','openclaw-weixin','--account',current['account'],'--target',current['owner'],'--message',page['text'],'--json'],timeout=45,idempotency_key=page['idempotency_key'])
             private_write(folder/f'task-delivery-{i+1}.json',sent)
             if sent.get('dryRun') or sent.get('payload',{}).get('deliveryStatus')!='sent':raise RuntimeError('Task delivery unconfirmed')
-        except BaseException:page['status']='unknown';private_write(path,journal);raise
+        except BaseException as error:
+            page['status']=getattr(error,'delivery_status','unknown')
+            if hasattr(error,'receipt_path'):page['receipt_path']=error.receipt_path
+            private_write(path,journal);raise
         page['status']='sent';page['sent_at']=datetime.now(TZ).isoformat();private_write(path,journal)
     phase('task_reminders_confirmed',tasks=len(journal['tasks']),pages=len(journal['pages']))
 
 
 def deliver_scheduled(day,folder,state,binding):
     if state.get('status')=='sent':phase('brief_duplicate_suppressed',day=day);return
-    if state.get('status') in ('delivery_pending','delivery_unknown'):
+    if state.get('status') in ('delivery_pending','delivery_unknown','delivery_queued','delivery_failed','delivery_suppressed'):
         if state['status']=='delivery_pending' and (folder/'narrative-delivery.json').exists():
             deliver_ready(day,folder,state,binding);return
         raise RuntimeError('Brief delivery uncertain; review local receipt before retrying')
@@ -371,7 +426,7 @@ def main():
         state=json.loads(state_path.read_text()) if state_path.exists() else {}
         if args.deliver_ready:
             deliver_scheduled(day,folder,state,binding);return
-        if state.get('status') in ('sent','delivery_pending','delivery_unknown'):
+        if state.get('status') in ('sent','delivery_pending','delivery_unknown','delivery_queued','delivery_failed','delivery_suppressed'):
             print(json.dumps({'day':day,'status':state['status'],'duplicate_suppressed':True}))
             return
         if state.get('status')=='ready':
