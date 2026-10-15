@@ -104,23 +104,23 @@ def deliver_ready(day, folder, state, binding):
 
 
 def format_task_pages(tasks,snapshot_at):
-    """Render short WeChat paragraphs, keeping all task IDs and source details local."""
+    """Use compact Markdown lists; identifiers stay in storage and tool calls."""
     pages=[]
     for category,label in (('self','我来做'),('followup','等对方推进'),('confirm','待确认')):
         group=[task for task in tasks if task['category']==category]
         chunks=[];lines=[];size=0
         for task in group:
-            line=f'{task["id"]} · {task["title"]}'
+            line=f'- {task["title"]}'
             if lines and (len(lines)>=10 or size+len(line)>600):chunks.append(lines);lines=[];size=0
             lines.append(line);size+=len(line)+2
         if lines:chunks.append(lines)
         for index,chunk in enumerate(chunks):
-            continuation=f' · {index+1}/{len(chunks)}' if len(chunks)>1 else ''
-            header=f'待办｜{snapshot_at[5:10].replace("-","月")}日\n\n{label} · {len(group)}项{continuation}'
-            pages.append(header+'\n\n'+'\n\n'.join(chunk))
+            continuation='（续）' if index else ''
+            header=f'**{label}{continuation}**'
+            pages.append(header+'\n\n'+'\n'.join(chunk))
     if pages:
-        pages[0]=pages[0].replace('\n\n',f'\n\n共{len(tasks)}项，完成情况待你更新。\n\n',1)
-        pages[-1]+='\n\n完成请发：完成 T002（替换编号）\n\n详情请发：查看 T002；会议里的“明天”等日期待确认。'
+        pages[0]=f'{snapshot_at[5:10].replace("-","月")}日待办\n\n'+pages[0]
+        pages[-1]+='\n\n做完哪件事，直接告诉我。日期不明确的事项，可问我详情。'
     return pages
 
 
