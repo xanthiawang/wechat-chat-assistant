@@ -108,3 +108,8 @@ python3.14 ~/.local/share/wechat-chat-assistant/app/setup.py uninstall
 聊天简报准备失败不会阻止待办提醒；两者分别记录回执，结果不明时不盲目重发。
 电脑需开机联网；同一日首次投递快照之后的修改反映在下一次提醒中。
 任务内容、来源文件、关系画像与回执均留本机，不进入GitHub；这些功能位于当前源码，旧发布包未必包含。
+
+微信展示参考 [MindScope 的 command-center 与分层记忆](https://github.com/xanthiawang/mindscope/tree/main/src-tauri/resources/synapse)：
+先显示简短任务标题，分“我来做／等对方推进／待确认”，每项之间空一行，每条消息最多10项。
+31项也会完整分页；原始日期表述、来源与详情按编号查询，不重复挤入每一行。
+记忆与呈现分开：SQL任务状态保留审计，语气与关系按需检索，原始记录保留来源；未安装新的记忆服务。

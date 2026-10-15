@@ -60,8 +60,10 @@ def task_list(db,value):
     status=value.get('status','open')
     if status not in ('open','done','cancelled','all'):raise ValueError('Invalid task status')
     query=value.get('query','');offset=max(0,int(value.get('offset',0)));limit=min(100,max(1,int(value.get('limit',30))))
-    where="(?='all' OR status=?) AND instr(lower(title||' '||details),lower(?))>0"
-    args=(status,status,query)
+    task_id=value.get('task_id','')
+    if task_id and not re.fullmatch(r'T[0-9]{3,}',task_id,re.I):raise ValueError('Invalid task ID')
+    where="(?='all' OR status=?) AND instr(lower(title||' '||details),lower(?))>0 AND (?='' OR number=?)"
+    args=(status,status,query,task_id,int(task_id[1:]) if task_id else -1)
     count=db.execute('SELECT count(*) FROM tasks WHERE '+where,args).fetchone()[0]
     rows=db.execute('SELECT * FROM tasks WHERE '+where+' ORDER BY number LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
     return {'tasks':[task_record(r) for r in rows],'total':count,'next_offset':offset+len(rows) if offset+len(rows)<count else None,

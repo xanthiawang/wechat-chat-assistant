@@ -56,7 +56,7 @@ export default {
           const arg=(ctx.args||'list').trim();
           if(!['list','done','all'].includes(arg))return {text:'用法：/todo list；/todo done T001；/todo reopen T001；/todo cancel T001（请替换实际编号）'};
           const result=await memoryCall(c,{action:'task_list',status:arg==='list'?'open':arg,limit:30});
-          return {text:result.tasks.map(t=>`${t.status==='done'?'☑':'□'} ${t.id} ${t.title}`).join('\n')+`\n共${result.total}项${result.next_offset!==null?'；更多请说“继续列出待办”':''}。完成可发“完成 T001”。`};
+          return {text:result.tasks.map(t=>`${t.status==='done'?'已完成':'待办'} ${t.id} · ${t.title}`).join('\n\n')+`\n\n共${result.total}项${result.next_offset!==null?'；更多请说“继续列出待办”':''}。完成可发“完成 T001”。`};
         }catch{ return {text:'待办操作未确认成功，状态请重新查询。可用 /todo list 查看编号，再发 /todo done 对应编号。'};}
       }});
     api.registerTool(ctx => ({
