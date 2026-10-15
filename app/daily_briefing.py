@@ -50,11 +50,12 @@ def task_narrative(tasks):
     for task in tasks:
         source=task['provenance'];date=source.get('meeting_date','')
         if not date or not source.get('locator'):raise ValueError('Persistent task source date and locator required')
-    for category,label in (('self','本人推进'),('followup','等待对方推进'),('confirm','待确认范围与安排')):
+    for category,label in (('self','我来做'),('followup','等对方'),('confirm','待确认')):
         group=[task for task in tasks if task['category']==category]
+        if group:paragraphs.append(label)
         for offset in range(0,len(group),3):
             chunk=group[offset:offset+3]
-            paragraphs.append('• 持续跟进／'+label+'：'+'；'.join(t['title'] for t in chunk)+'。')
+            paragraphs.append('• '+'；'.join(t['title'] for t in chunk)+'。')
     return '\n\n'.join(paragraphs)
 
 
@@ -76,7 +77,7 @@ def compose_report(day,text,coverage,tasks):
     sections=report_sections(text)
     if tasks is None:sections[0]+='\n\n持续事项：本次读取失败，未合入；这不代表没有待办。'
     tasks=tasks or [];notes=task_narrative([t for t in tasks if t['status']=='open'])
-    if notes:sections[0]=(sections[0]+'\n\n持续待办：\n\n'+notes).strip()
+    if notes:sections[0]=(sections[0]+'\n\n'+notes).strip()
     cutoff=int(datetime.fromisoformat(coverage['window_start']).timestamp())
     for task in tasks:
         if task['status']=='open' and re.search(r'\d{1,2}月\d{1,2}日',task['due_original']):
@@ -337,6 +338,7 @@ def main():
             '必须按以下四个标题依次组织，逐字使用且每个只出现一次：\n'+'\n'.join(REPORT_SECTIONS)+'\n'
             '每项写成“• 事项概括：具体背景、当前进展、需要谁处理、缺失结论。”。'
             '段间空一行，不用表格、代码块、内部编号，也不要只罗列任务名称。每项先说事实，再说下一步或待确认。'
+            '避免重复标签和套话；我来做、等对方、待确认各只作一次小标题，条目前不重复持续跟进、本人推进或等待对方推进。'
             '只输出总结结果：事项、结论、当前进展和下一步。不要输出出处括注、来源列表、聊天时间戳、录音时间码、内部编号、数据库路径或技术注释。'
             '约会、会议安排和明确期限仍在正文保留具体日期时间。完整溯源和覆盖统计保留本机，只有主人问详情或数据范围时才展示。'
             '优先处理里包括需要本人决定或回复的事、等待协作者的跟进、未定邀约、未回复私聊；不要把所有事项归给主人执行。'
