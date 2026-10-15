@@ -45,19 +45,11 @@ def scope_footer(coverage):
     return f'数据说明：仅覆盖此Mac当前已同步记录，共{chats}个活跃会话、{messages}条消息；{text}条可读文本已纳入，{omitted}条非文本／其他类型消息未解析。官方手机恢复备份未作为可读来源，不代表手机全部历史；未理解图片、语音、附件或XML内容。“未见完成／回复”仅指上述当日材料。持续事项另注明其原始来源日期，以投递时本机状态为准；完成情况待本人更新。'
 
 
-def meeting_label(date):
-    parsed=datetime.strptime(date,'%Y-%m-%d')
-    return f'{parsed.month}月{parsed.day}日会议'
-
-
 def task_narrative(tasks):
-    paragraphs=[];dates=[]
+    paragraphs=[]
     for task in tasks:
         source=task['provenance'];date=source.get('meeting_date','')
         if not date or not source.get('locator'):raise ValueError('Persistent task source date and locator required')
-        label=meeting_label(date)
-        if label not in dates:dates.append(label)
-    if dates:paragraphs.append('来源：'+'、'.join(dates))
     for category,label in (('self','本人推进'),('followup','等待对方推进'),('confirm','待确认范围与安排')):
         group=[task for task in tasks if task['category']==category]
         for offset in range(0,len(group),3):
@@ -79,23 +71,22 @@ def paginate_report(text,limit=3600):
 
 
 def compose_report(day,text,coverage,tasks):
+    text=re.sub(r'(?<=[。！？])（[^（）\n]*(?:\d{1,2}:\d{2}|@chatroom|会议记录)[^（）\n]*）(?=\s*(?:\n|$))','',text)
     text=re.sub(r'[A-Za-z0-9_-]+@chatroom','相关群聊',text)
     sections=report_sections(text)
     if tasks is None:sections[0]+='\n\n持续事项：本次读取失败，未合入；这不代表没有待办。'
     tasks=tasks or [];notes=task_narrative([t for t in tasks if t['status']=='open'])
-    if notes:sections[0]=(sections[0]+'\n\n持续事项（完成情况待你更新，相对日期待确认）：\n\n'+notes).strip()
+    if notes:sections[0]=(sections[0]+'\n\n持续待办：\n\n'+notes).strip()
     cutoff=int(datetime.fromisoformat(coverage['window_start']).timestamp())
     for task in tasks:
         if task['status']=='open' and re.search(r'\d{1,2}月\d{1,2}日',task['due_original']):
-            source=task['provenance']
-            sections[1]+='\n\n• 既有日程待核对：'+task['due_original']+'，'+task['title']+'。具体安排请再核对。（'+meeting_label(source['meeting_date'])+'）'
+            sections[1]+='\n\n• 既有日程待核对：'+task['due_original']+'，'+task['title']+'。具体安排请再核对。'
         if task['status'] not in ('done','cancelled') or task['updated_at']<cutoff:continue
         label='本人报告已完成' if task['status']=='done' else '本人已取消提醒（不等于已完成）'
-        at=datetime.fromtimestamp(task['updated_at'],TZ).strftime('%m月%d日%H:%M')
-        sections[2]+='\n\n• 状态更新：'+task['title']+'，'+label+'。（助手中的本人反馈记录 '+at+'）'
+        sections[2]+='\n\n• 状态更新：'+task['title']+'，'+label+'。'
     date=datetime.strptime(day,'%Y-%m-%d').strftime('%Y年%m月%d日')
     body='\n\n'.join(heading+'\n\n'+section for heading,section in zip(REPORT_SECTIONS,sections))
-    return f'微信每日简报｜{date}\n\n范围：北京时间00:00—24:00\n\n'+body+'\n\n'+scope_footer(coverage)
+    return f'微信每日简报｜{date}\n\n范围：北京时间00:00—24:00\n\n'+body
 
 
 def phase(name, **fields):
@@ -344,17 +335,17 @@ def main():
             '固定标题：微信每日简报｜'+datetime.strptime(day,'%Y-%m-%d').strftime('%Y年%m月%d日')+'\n'
             '固定范围行：范围：北京时间00:00—24:00\n'
             '必须按以下四个标题依次组织，逐字使用且每个只出现一次：\n'+'\n'.join(REPORT_SECTIONS)+'\n'
-            '每项写成“• 事项概括：具体背景、当前进展、需要谁处理、缺失结论。（来源名称）”。'
+            '每项写成“• 事项概括：具体背景、当前进展、需要谁处理、缺失结论。”。'
             '段间空一行，不用表格、代码块、内部编号，也不要只罗列任务名称。每项先说事实，再说下一步或待确认。'
-            '出处只保留简短人名或群名，不堆叠发言人和聊天时间戳；没有真实群名就写相关群聊，禁止展示@chatroom、微信内部ID或数据库路径。'
-            '日程和明确期限仍在正文保留具体日期时间；会议记录只标日期，不展示录音分钟秒数。完整溯源保留本机，按需查详情。'
+            '只输出总结结果：事项、结论、当前进展和下一步。不要输出出处括注、来源列表、聊天时间戳、录音时间码、内部编号、数据库路径或技术注释。'
+            '约会、会议安排和明确期限仍在正文保留具体日期时间。完整溯源和覆盖统计保留本机，只有主人问详情或数据范围时才展示。'
             '优先处理里包括需要本人决定或回复的事、等待协作者的跟进、未定邀约、未回复私聊；不要把所有事项归给主人执行。'
             '日程明确写日期、时间及已确认/待确认；项目进展区分已交付、仅分享预览、计划、他人转述和未经验证的数据；其他关注保留必要生活事项。'
             '完成与未完成不得混淆，已有交付证据的不再写未交付。可简写“待回复／待反馈”，不逐项重复长篇限制说明；'
-            '数据说明统一注明未见反馈仅限当日可读材料，不排除其他渠道回应。本人自述不是医疗诊断，竞品/他人分享不是团队实测成果。'
+            '“待回复／待反馈”只描述当日可读材料，不得据此断言所有渠道均未回应。本人自述不是医疗诊断，竞品/他人分享不是团队实测成果。'
             '不能从相对日期、讨论或玩笑自行生成承诺、合同完成或确定截止日。重要事项不因条数限制被遗漏，重复事项合并。'
-            '每个部分无事实支持时说明“当日材料未见可确认事项”。末尾用“数据说明：”开头说明本机同步范围、未解析类型及统计。'
-            '数据说明之后不要再写新章节。正文尽量1800字以内，保留具体人、项目、日期、时间和证据边界。'
+            '每个部分无事实支持时简写“暂无需关注事项”。不输出数据说明、覆盖统计、方法介绍或重复限制注释。'
+            '只保留四个固定章节。正文尽量1800字以内，保留具体人、项目、必要日期时间和待确认状态。'
             '持久任务会在投递时按最新状态单独合入第一部分，不需要凭记忆补任务。\n统计：'+json.dumps(metadata,ensure_ascii=False)+
             '\n分批笔记：\n'+'\n\n'.join(notes))
         if len(final_prompt.encode())>200000:
