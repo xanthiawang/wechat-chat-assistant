@@ -74,7 +74,7 @@ def configure_schedules(brief_script=None):
         else:job=oc('cron','add',*common,'--declaration-key',key,'--disabled',capture=True)
         job=job.get('job',job);c[field]=job['id'];write(CONFIG,c);return job['id']
     daily_key=next((j.get('declarationKey') or 'wechat-chat-assistant:daily' for j in existing if j.get('id')==c.get('daily_job_id') or j.get('declarationKey')=='zixin-wechat:daily-briefing'),'wechat-chat-assistant:daily')
-    install('preparation_job_id','微信晨报提前准备','wechat-chat-assistant:prepare','40 8 * * *',
+    install('preparation_job_id','微信晨报提前准备','wechat-chat-assistant:prepare','20 8 * * *',
         [c['python'],str(brief_script),'--prepare'],1000)
     install('daily_job_id','微信每日简报',daily_key,'0 9 * * *',
         [c['python'],str(brief_script),'--deliver-ready'],300)
@@ -257,8 +257,8 @@ def activate():
     # Preserve the canonical sent-day receipt even for trial runs.
     configure_schedules()
     with (BASE/'workspace/SOUL.md').open('a') as f:
-        f.write('\n真实读取、模型检索和完整简报试发已验证。08:40准备晨报、09:00尝试投递；学习独立运行（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
-    print('真实检索和完整试发已通过。08:40提前准备，09:00投递；学习独立运行。Mac必须开机联网。')
+        f.write('\n真实读取、模型检索和完整简报试发已验证。08:20准备晨报、09:00尝试投递；学习独立运行（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
+    print('真实检索和完整试发已通过。08:20提前准备，09:00投递；学习独立运行。Mac必须开机联网。')
 
 
 def pause_and_invalidate(reader=False):
