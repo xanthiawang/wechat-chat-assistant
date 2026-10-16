@@ -25,6 +25,16 @@ sys.path.insert(0,str(BASE/'app'))
 REPORT_SECTIONS=('一、需要处理','二、日程安排','三、项目进展','四、其他关注')
 LEGACY_REPORT_SECTIONS=('一、优先处理／回复','二、明确日程／待核对','三、项目／商务进展','四、其他关注')
 ACTION_GROUPS=('我来处理','等对方推进','需要确认')
+TOPIC_RULES=(
+    ('合同与入职',('合同','法务','保密','薪酬','职位','工位','办公位置','人脸录入')),
+    ('商务合作',('Sword','采购','供应','合作方','客户','账号','使用资源')),
+    ('官网与产品',('官网','后台','UI','视觉','产品体系','定价','营销','平台展示','接口')),
+    ('科研合作',('论文','科研','实习生')),
+    ('机器人与数字分身',('机器人','数字分身','老人','老年','新用户群')),
+    ('融资与公司协作',('融资','团队资料','公司历史','BP')),
+    ('活动与拍摄',('进博会','卫视','录制','访谈','拍摄')),
+    ('个人安排',('机票','美国行','20元')),
+)
 SCHEDULE_GROUPS=('已确认','待确定')
 TASK_TAG=re.compile(r'\[\[task:(T[0-9]{3,})\]\]')
 
@@ -126,7 +136,23 @@ def task_action(task,routes):
         action=task.get('details','').split('；',1)[0].strip().rstrip('。')
         if not action:action='先确认要交付的内容'
         action+='；对接人待确认'
-    return task['title']+'：'+action.rstrip('。')+'。'
+    contact=route.get('contact','').strip()
+    if contact and action.startswith('找'+contact):action=action[len('找'+contact):]
+    prefix=contact+'｜' if contact and contact not in ('自己','本人','会议对方') else ''
+    return prefix+task['title']+'：'+action.rstrip('。')+'。'
+
+
+def action_topic(text,preferred=None):
+    if preferred and preferred not in ACTION_GROUPS:
+        if len(preferred)>30 or re.search(r'[\n\r\[\]（）]',preferred):raise ValueError('Invalid project topic')
+        return preferred
+    for label,words in TOPIC_RULES:
+        if any(word.casefold() in text.casefold() for word in words):return label
+    return '其他事项'
+
+
+def task_topic(task,routes):
+    return action_topic(task['title'],routes.get(task['id'],{}).get('topic'))
 
 
 def ensure_task_contact(text,task,routes):
@@ -139,13 +165,13 @@ def ensure_task_contact(text,task,routes):
 
 
 def task_narrative(tasks,routes=None):
-    groups={label:[] for label in ACTION_GROUPS};routes=load_task_routes(tasks) if routes is None else routes
+    groups={};routes=load_task_routes(tasks) if routes is None else routes
     for task in tasks:
         source=task['provenance']
         if not source.get('meeting_date') or not source.get('locator'):raise ValueError('Persistent task source required')
-        label=dict(zip(('self','followup','confirm'),ACTION_GROUPS))[task['category']]
+        label=task_topic(task,routes)
         append_item(groups,label,task_action(task,routes),(task['id'],))
-    return render_groups(groups,ACTION_GROUPS)
+    return render_groups(groups)
 
 
 def paginate_report(text,limit=3600):
@@ -164,15 +190,14 @@ def compose_report(day,text,coverage,tasks):
     text=re.sub(r'(?<=[。！？])（[^（）\n]*(?:@chatroom|会议记录|来源[：:])[^（）\n]*）(?=\s*(?:\n|$))','',text)
     text=re.sub(r'[A-Za-z0-9_-]+@chatroom','相关群聊',text)
     sections=report_sections(text)
-    parsed=[outline_groups(part,default) for part,default in zip(sections,('我来处理','待确定','其他项目','其他'))]
+    parsed=[outline_groups(part,default) for part,default in zip(sections,('其他事项','待确定','其他项目','其他'))]
     routes=load_task_routes(tasks or [])
     result=[{}, {}, {}, {}];by_id={task['id']:task for task in tasks or []};represented=set()
     for index,groups in enumerate(parsed):
         for label,items in groups.items():
-            if index==0 and label not in ACTION_GROUPS:raise ValueError('Unrecognized responsibility heading')
             if index==1 and label not in SCHEDULE_GROUPS:raise ValueError('Unrecognized schedule status heading')
             for item in items:
-                item_label=label
+                item_label=action_topic(item['text'],label) if index==0 else label
                 refs=item['tasks']
                 if refs and index>1:raise ValueError('Task identity belongs only in actions or schedules')
                 if tasks is not None:
@@ -182,27 +207,24 @@ def compose_report(day,text,coverage,tasks):
                     represented.update(refs)
                     if refs and all(by_id[ref]['status']!='open' for ref in refs):continue
                     if index==0 and refs:
-                        categories={by_id[ref]['category'] for ref in refs if by_id[ref]['status']=='open'}
-                        if len(categories)!=1:raise ValueError('Different task responsibilities combined')
-                        item_label=dict(zip(('self','followup','confirm'),ACTION_GROUPS))[categories.pop()]
+                        item_label=task_topic(by_id[refs[0]],routes)
                 body=item['text']
                 if refs and tasks is not None:body=ensure_task_contact(body,by_id[refs[0]],routes)
                 append_item(result[index],item_label,body,refs)
-    if tasks is None:append_item(result[0],'需要确认','持续待办本次未能读取，未纳入这份简报。')
+    if tasks is None:append_item(result[0],'其他事项','持续待办本次未能读取，未纳入这份简报。')
     cutoff=int(datetime.fromisoformat(coverage['window_start']).timestamp())
     for task in tasks or []:
         if task['status']=='open' and task['id'] not in represented:
-            label=dict(zip(('self','followup','confirm'),ACTION_GROUPS))[task['category']]
             if re.search(r'\d{1,2}月\d{1,2}日',task['due_original']):
-                append_item(result[1],'待确定',task['due_original']+'：'+task_action(task,routes)+'；'+label+'，安排待核对。',(task['id'],))
-            else:append_item(result[0],label,task_action(task,routes),(task['id'],))
+                append_item(result[1],'待确定',task['due_original']+'：'+task_action(task,routes)+'安排待核对。',(task['id'],))
+            else:append_item(result[0],task_topic(task,routes),task_action(task,routes),(task['id'],))
         if task['status'] in ('done','cancelled') and task['updated_at']>=cutoff:
             status='已完成（本人更新）' if task['status']=='done' else '已取消提醒'
             append_item(result[2],'事项更新',task['title']+'：'+status+'。')
     rendered=[ref for groups in result for items in groups.values() for item in items for ref in item['tasks']]
     if tasks is not None and any(rendered.count(task['id'])!=1 for task in tasks if task['status']=='open'):
         raise ValueError('Every current open task must be represented exactly once')
-    bodies=[render_groups(result[0],ACTION_GROUPS),render_groups(result[1],SCHEDULE_GROUPS),render_groups(result[2])]
+    bodies=[render_groups(result[0]),render_groups(result[1],SCHEDULE_GROUPS),render_groups(result[2])]
     other=[item['text'] for items in result[3].values() for item in items]
     bodies.append('\n\n'.join(f'{i}. '+value for i,value in enumerate(other,1)) or '暂无需关注事项。')
     date=datetime.strptime(day,'%Y-%m-%d').strftime('%Y年%m月%d日')
@@ -541,9 +563,10 @@ def main():
             '固定范围行：范围：北京时间00:00—24:00\n'
             '必须按以下四个标题依次组织，逐字使用且每个只出现一次：\n'+'\n'.join(REPORT_SECTIONS)+'\n'
             '只使用中文论文三级编号：一级为固定四个章节；二级为（一）（二）；每项为1. 2.，一项一段，禁止使用•或其他列表符号。'
-            '第一章二级标题固定为（一）我来处理、（二）等对方推进、（三）需要确认；第二章为（一）已确认、（二）待确定。'
+            '第一章二级标题按真实项目或主题分组，例如官网与产品、合同与入职、商务合作；不按人名或责任类别另设层级。第二章为（一）已确认、（二）待确定。'
             '第三章按真实项目设二级标题；第四章直接用1. 2.列事项，不设二级标题。每组编号从1重新开始。'
             '每个需要行动的条目必须说明联系谁、谁负责及具体要做什么；优先用真实姓名或微信备注，不只写抽象任务名称。'
+            '条目使用“人名：事项；下一步”或“人名｜事项：下一步”，不添加“找”字引导。具体执行者与等待谁反馈写入正文，不把联系人误当执行者；无需外部联系的事项不强加人名。'
             'verified_routing是已核对的本机联系线索，姓名不确定就保留不确定；未标名的会议对方不得自行改写成路畅或其他人。'
             '无须对外联系的调研可写自己先做什么；没有可核对的联系人就写对接人待确认，并说明要先向谁或从哪一步确认。'
             '一条只讲一件事，背景、进展和下一步放在同一条。同一事项只出现一次；有具体日程或期限的事项放第二章，不在第一章重复。'
@@ -559,7 +582,7 @@ def main():
             '每个部分无事实支持时简写“暂无需关注事项”。不输出数据说明、覆盖统计、方法介绍或重复限制注释。'
             '只保留四个固定章节。正文尽量1800字以内，保留具体人、项目、必要日期时间和待确认状态。'
             '下面本机任务与聊天中同一事项合并；引用任务时保留完整title，在该条末尾附内部标记[[task:T编号]]，使用真实id。标记仅供程序关联，投递会删除。'
-            '每个任务id仅出现一次，仅放第一或第二章；category=self为我来处理、followup为等对方推进、confirm为需要确认。'
+            '每个任务id仅出现一次，仅放第一或第二章；category=self由主人处理、followup等待协作者推进、confirm仍需确认，这些责任语义保留在条目正文，不再用作二级标题。'
             '任务有日期不代表已确认；没有确认依据的约定或期限放待确定，保留责任与不确定性。未完成状态不得推断为逾期。'
             '任务可以省略，投递时会补齐最新未完成项；不要在其他段落再次改写已关联的同一事项。\n本机真实任务：'+json.dumps(task_notes,ensure_ascii=False)+'\n统计：'+json.dumps(metadata,ensure_ascii=False)+
             '\n分批笔记：\n'+'\n\n'.join(notes))
