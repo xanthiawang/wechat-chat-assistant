@@ -55,7 +55,7 @@ def decide(c,now=None):
     for name in ('narrative-delivery.json','task-reminder.json'):
         journal=load(folder/name)
         if journal and journal.get('binding')!=binding:raise ValueError('Delivery journal belongs to another binding')
-        if any(p.get('status') in UNCERTAIN for p in journal.get('pages',[])):return {'action':'held','day':day,'reason':'delivery_requires_review'}
+        if any(p.get('status') not in ('sent','unsent') for p in journal.get('pages',[])):return {'action':'held','day':day,'reason':'delivery_requires_review'}
     if str(state.get('status','')).startswith('delivery_'):
         if state.get('status')!='delivery_pending' or not (folder/'narrative-delivery.json').exists():
             return {'action':'held','day':day,'reason':'delivery_requires_review'}

@@ -23,6 +23,7 @@ import AppKit
         if configuration.isEmpty { status = ["installed": false] } else { refresh() }
     }
     var installed: Bool { !configuration.isEmpty }
+    var currentRuntime: Bool { configuration["version"] as? String == "0.3.0" }
     var connected: Bool { configuration["account"] != nil && configuration["owner"] != nil }
     var reader: Bool { configuration["reader_verified"] as? Bool == true && configuration["original_app_confirmed"] as? Bool == true }
     var schedules: [String: Any] { status["schedules"] as? [String: Any] ?? [:] }
@@ -153,7 +154,7 @@ struct AssistantView: View {
                     card("4", "验证与修复早报", "提前准备、08:00核对、09:00投递，唤醒后中午前补发。", model.dailyEnabled ? "已启用 09:00" : "尚未确认启用", model.dailyEnabled, "验证／修复", "repair")
                     HStack {
                         VStack(alignment:.leading,spacing:5) { Text("导入你的待办（可选）").fontWeight(.semibold);Text("粘贴或选文件，逐项核对联系人、项目和完成状态。").font(.caption).foregroundStyle(.secondary) }
-                        Spacer();Button("导入待办…") { importing=true }.disabled(model.readOnly || !model.reader || model.python()==nil)
+                        Spacer();Button(model.currentRuntime ? "导入待办…" : "请先更新程序") { importing=true }.disabled(model.readOnly || !model.currentRuntime || !model.reader || model.python()==nil)
                     }.padding(15).overlay(RoundedRectangle(cornerRadius:12).stroke(Color(nsColor:.separatorColor).opacity(0.5)))
                     VStack(alignment:.leading,spacing:9) {
                         HStack { Text("运行状态").fontWeight(.semibold); Spacer(); Text(model.sourceDay).foregroundStyle(.secondary) }
