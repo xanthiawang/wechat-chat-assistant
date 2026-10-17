@@ -1,28 +1,39 @@
 #!/usr/bin/env python3
 """Allowlisted release archives; private runtime folders cannot enter assets."""
+import argparse
+import gzip
 import hashlib
+import json
 from pathlib import Path
 import tarfile
 import zipfile
 from check_package import ROOT, files, main as check
 
-VERSION='0.1.0'
+VERSION=json.loads((ROOT/'package.json').read_text())['version']
 PREFIX='wechat-chat-assistant-v'+VERSION
 
 
 def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--macos',action='store_true',help='Also compile the native launcher and build a DMG on macOS')
+    args=parser.parse_args()
     check()
     out=ROOT/'dist';out.mkdir(exist_ok=True)
     paths=files()
     tgz=out/(PREFIX+'.tgz');zip_path=out/(PREFIX+'.zip')
-    with tarfile.open(tgz,'w:gz') as archive:
+    with tgz.open('wb') as raw,gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0) as compressed,tarfile.open(fileobj=compressed,mode='w') as archive:
         for p in paths:
             info=archive.gettarinfo(str(p),arcname=PREFIX+'/'+str(p.relative_to(ROOT)))
-            info.uid=info.gid=0
+            info.uid=info.gid=info.mtime=0
             info.uname=info.gname=''
+            info.mode=0o755 if p.stat().st_mode&0o111 else 0o644
             with p.open('rb') as stream:archive.addfile(info,stream)
     with zipfile.ZipFile(zip_path,'w',compression=zipfile.ZIP_DEFLATED) as archive:
-        for p in paths:archive.write(p,arcname=PREFIX+'/'+str(p.relative_to(ROOT)))
+        for p in paths:
+            info=zipfile.ZipInfo(PREFIX+'/'+str(p.relative_to(ROOT)),date_time=(1980,1,1,0,0,0))
+            info.external_attr=(0o100755 if p.stat().st_mode&0o111 else 0o100644)<<16
+            info.compress_type=zipfile.ZIP_DEFLATED
+            archive.writestr(info,p.read_bytes())
     digest=hashlib.sha256(tgz.read_bytes()).hexdigest()
     bootstrap=out/'install.sh'
     bootstrap.write_text('''#!/bin/bash
@@ -47,7 +58,12 @@ mv "$tmp/wechat-chat-assistant-vVERSION" "$target"
 exec /bin/bash "$target/Install.command"
 '''.replace('VERSION',VERSION).replace('DIGEST',digest))
     bootstrap.chmod(0o755)
-    sums=''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in [tgz,zip_path,bootstrap])
+    assets=[tgz,zip_path,bootstrap]
+    if args.macos:
+        from build_macos import main as build_macos
+        build_macos()
+        assets += [out/f'WeChat-Chat-Assistant-{VERSION}-arm64.app.zip',out/f'WeChat-Chat-Assistant-{VERSION}-arm64.dmg']
+    sums=''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in assets)
     (out/'SHA256SUMS').write_text(sums)
     print(sums)
 

@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
   echo "此 Beta 仅支持 Apple Silicon macOS。"; exit 1
 fi

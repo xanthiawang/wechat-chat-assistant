@@ -18,7 +18,7 @@ PROFILE='wechat-chat-assistant'
 SOURCE=Path(__file__).resolve().parent.parent
 STATE=Path.home()/('.openclaw-'+PROFILE)
 CONFIG=BASE/'reader-config.json'
-VERSION='0.1.0'
+VERSION='0.2.0'
 
 
 def write(path, value):
@@ -93,8 +93,8 @@ def install():
         raise RuntimeError('Beta仅支持Apple Silicon macOS；请不要用Rosetta运行。')
     if sys.version_info<(3,14):raise RuntimeError('需要Python 3.14+（zstd支持）。')
     if CONFIG.exists():
-        print('检测到已有安装。配置和记录已保留。使用 connect、reader、verify、enable 子命令继续。')
-        return
+        print('检测到已有安装，继续配置；不覆盖程序、配置或记录。')
+        return resume()
     if STATE.exists():raise RuntimeError('已有同名OpenClaw profile；拒绝覆盖。请使用其他隔离环境。')
     if (BASE/'app').exists() or (BASE/'runtime').exists():
         raise RuntimeError('发现未完成安装。不会覆盖；请按 docs/RECOVERY.md 处理。')
@@ -133,6 +133,7 @@ def install():
     oc('plugins','install',str(BASE/'runtime/node_modules/@tencent-weixin/openclaw-weixin'),'--force')
     oc('plugins','install',str(BASE/'runtime/node_modules/@openclaw/codex'),'--force')
     oc('gateway','install','--port',str(port),'--runtime-path',c['node'])
+    oc('gateway','start')
     # A brand-new isolated profile belongs exclusively to this installer.
     # Disable dependency-generated background model jobs before authorization.
     for job in oc('cron','list','--json',capture=True).get('jobs',[]):
@@ -145,6 +146,21 @@ def install():
         if confirm('执行真实模型检索和完整昨日简报试发？相关文字将发送到你选择的模型服务，使用订阅额度。'):
             activate()
     print('安装向导结束。诊断：python3.14 '+str(BASE/'app/setup.py')+' doctor')
+
+
+def resume():
+    c=config()
+    if c.get('version')!=VERSION:
+        print('当前安装版本为 '+str(c.get('version','未知'))+'；恢复配置不会自动升级旧程序。请参阅更新说明。')
+    if not c.get('account') or not c.get('owner'):
+        connect()
+    c=config()
+    if not c.get('key_file') or not c.get('original_app_confirmed'):
+        if not confirm('现在继续聊天读取初始化？需要本人备份、退出微信并同意临时副本操作。'):return
+        reader()
+    if not config().get('reader_verified'):verify()
+    if confirm('继续真实模型检索与完整昨日简报试发，通过后启用08:20准备、09:00投递？这会使用订阅额度并向你发送测试简报。'):
+        activate()
 
 
 def connect():
@@ -280,11 +296,70 @@ def pause_and_invalidate(reader=False):
 
 
 def doctor():
-    c=config();checks={'platform':platform.system()+'/'+platform.machine(),'version':c['version'],
-       'model_and_channel_connected':bool(c.get('account') and c.get('owner')),'reader_verified':bool(c.get('reader_verified'))}
-    if c.get('daily_job_id'):
-        j=oc('cron','get',c['daily_job_id'],'--json',capture=True);j=j.get('job',j)
-        checks['briefing_enabled']=j.get('enabled');checks['next_run_ms']=j.get('nextRunAtMs')
+    from zoneinfo import ZoneInfo
+    from datetime import timedelta
+    import sqlite3
+    checked=datetime.now(ZoneInfo('Asia/Shanghai'))
+    checks={'checked_at':checked.isoformat(),'platform':platform.system()+'/'+platform.machine(),
+            'launcher_version':VERSION,'installed':CONFIG.exists(),'checks':{},'warnings':[]}
+    if not CONFIG.exists():
+        checks['warnings'].append('尚未安装；未检查登录、聊天读取或调度。')
+        print(json.dumps(checks,ensure_ascii=False,indent=2));return
+    c=config()
+    if c.get('version') and c.get('version')!=VERSION:
+        checks['warnings'].append('已安装程序版本与配置应用不同；继续配置不会自动覆盖旧程序。')
+    checks.update(version=c.get('version'),profile=c.get('profile'),
+       model_and_channel_connected=bool(c.get('account') and c.get('owner')),
+       reader_verified=bool(c.get('reader_verified')),original_app_confirmed=bool(c.get('original_app_confirmed')))
+    checks['checks']['account_flags']='saved_configuration_only'
+    try:
+        jobs=oc('cron','list','--json',capture=True,timeout=25).get('jobs',[])
+        checks['checks']['gateway']='live'
+        checks['schedules']={}
+        for field in ['preparation_job_id','daily_job_id','learning_job_id']:
+            job=next((j for j in jobs if j.get('id')==c.get(field)),None)
+            state=(job or {}).get('state',{})
+            checks['schedules'][field]=None if job is None else {
+                'enabled':job.get('enabled'),'schedule':job.get('schedule'),
+                'last_status':state.get('lastRunStatus'),'last_run_ms':state.get('lastRunAtMs'),
+                'next_run_ms':state.get('nextRunAtMs'),'last_error':state.get('lastError')}
+        daily=checks['schedules']['daily_job_id']
+        checks['briefing_enabled']=daily.get('enabled') if daily else False
+        for value in checks['schedules'].values():
+            if value and value.get('last_status')=='error':checks['warnings'].append('定时任务最近一次运行失败，请查看状态与本机日志。');break
+    except Exception as error:
+        checks['checks']['gateway']='unavailable';checks['briefing_enabled']=None
+        checks['warnings'].append('未取得实时调度状态：'+str(error))
+    if all(c.get(k) for k in ['db_root','self_id','owner','account']):
+        fingerprint=hashlib.sha256(json.dumps({k:c[k] for k in ['db_root','self_id','owner','account']},sort_keys=True).encode()).hexdigest()
+        memory_binding=hashlib.sha256(json.dumps({k:c.get(k) for k in ['owner','account','self_id','db_root','key_file']},sort_keys=True).encode()).hexdigest()
+        folder=BASE/'memory'/memory_binding
+        status=folder/'learning-status.json'
+        if status.exists():
+            value=json.loads(status.read_text())
+            checks['learning']={k:value.get(k) for k in ['phase','at','voice_samples','observed_edit_candidates','candidates_added','error_type']}
+        database=folder/'memory.sqlite'
+        if database.exists():
+            db=sqlite3.connect(database.as_uri()+'?mode=ro',uri=True,timeout=2)
+            try:
+                checks['tasks']={row[0]:row[1] for row in db.execute('SELECT status,count(*) FROM tasks GROUP BY status')}
+                checks['observed_edits']=db.execute('SELECT count(*) FROM feedback').fetchone()[0]
+            finally:db.close()
+        day=(checked-timedelta(days=1)).strftime('%Y-%m-%d')
+        reports=BASE/'reports'/fingerprint/day
+        if not reports.exists():reports=BASE/'reports'/day
+        state=reports/'status.json'
+        checks['latest_briefing']={'source_day':day,'status':'not_prepared'}
+        if state.exists():
+            value=json.loads(state.read_text())
+            checks['latest_briefing'].update({k:value.get(k) for k in ['status','prepared_at','sent_at','correction_sent_at','error_type']})
+        fallback=reports/'task-reminder.json'
+        if fallback.exists():
+            pages=json.loads(fallback.read_text()).get('pages',[])
+            checks['latest_briefing']['fallback_pages_sent']=sum(p.get('status')=='sent' for p in pages)
+        checks['checks']['learning_and_briefing']='local_saved_records'
+    checks['reply_sending']='not_in_public_beta'
+    checks['warnings'].append('休眠、离线、订阅额度不足或微信会话失效会影响09:00投递。')
     print(json.dumps(checks,ensure_ascii=False,indent=2))
 
 
@@ -301,10 +376,10 @@ def uninstall():
 if __name__=='__main__':
     os.umask(0o077)
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command',choices=['install','connect','reader','verify','enable','doctor','uninstall'])
+    ap.add_argument('command',choices=['install','resume','connect','reader','verify','enable','doctor','uninstall'])
     try:
         args=ap.parse_args()
-        {'install':install,'connect':connect,'reader':reader,'verify':verify,'enable':activate,'doctor':doctor,'uninstall':uninstall}[args.command]()
+        {'install':install,'resume':resume,'connect':connect,'reader':reader,'verify':verify,'enable':activate,'doctor':doctor,'uninstall':uninstall}[args.command]()
     except (Exception,KeyboardInterrupt) as error:
         print('未完成：'+str(error),file=sys.stderr)
         print('现有配置和数据保留。请参阅 docs/RECOVERY.md。',file=sys.stderr)

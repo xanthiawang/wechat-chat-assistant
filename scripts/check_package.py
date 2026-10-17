@@ -40,6 +40,10 @@ def main():
         assert hashlib.sha256((ROOT/'app/vendor'/name).read_bytes()).hexdigest()==value,name
     package=json.loads((ROOT/'package.json').read_text());lock=json.loads((ROOT/'package-lock.json').read_text())
     assert package['dependencies']==lock['packages']['']['dependencies']
+    assert package['version']==lock['version']==lock['packages']['']['version']
+    setup=ast.parse((ROOT/'app/setup.py').read_text())
+    version=next(ast.literal_eval(n.value) for n in setup.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='VERSION' for t in n.targets))
+    assert version==package['version'],'Installer version differs from package version'
     for name,version in package['dependencies'].items():
         entry=lock['packages']['node_modules/'+name]
         assert entry['version']==version and entry.get('integrity'),name
