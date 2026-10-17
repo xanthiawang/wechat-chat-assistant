@@ -18,7 +18,7 @@ PROFILE='wechat-chat-assistant'
 SOURCE=Path(__file__).resolve().parent.parent
 STATE=Path.home()/('.openclaw-'+PROFILE)
 CONFIG=BASE/'reader-config.json'
-VERSION='0.2.0'
+VERSION='0.3.0'
 
 
 def write(path, value):
@@ -61,31 +61,44 @@ def oc(*args,capture=False,timeout=None):
 
 
 def configure_schedules(brief_script=None):
-    c=config();brief_script=brief_script or BASE/'app/daily_briefing.py'
+    import fcntl
+    from contextlib import ExitStack
+    from scheduler import install as install_agent,ROOT as scheduler_root
+    c=config();original=dict(c)
     if not c.get('reader_verified') or not c.get('original_app_confirmed'):
         raise RuntimeError('真实读取和原版微信尚未验证；不启用调度。')
-    existing=oc('cron','list','--json',capture=True)['jobs']
-    def install(field,name,key,expr,argv,seconds):
-        old=next((j for j in existing if j.get('declarationKey')==key or j.get('id')==c.get(field)),None)
-        common=['--name',name,'--cron',expr,'--tz','Asia/Shanghai','--exact',
-            '--command-argv',json.dumps(argv),'--command-cwd',str(BASE/'app'),
-            '--command-env','WECHAT_ASSISTANT_HOME='+str(BASE),'--timeout-seconds',str(seconds),'--no-deliver','--json']
-        if old:job=oc('cron','edit',old['id'],*common,'--disable',capture=True)
-        else:job=oc('cron','add',*common,'--declaration-key',key,'--disabled',capture=True)
-        job=job.get('job',job);c[field]=job['id'];write(CONFIG,c);return job['id']
-    daily_key=next((j.get('declarationKey') or 'wechat-chat-assistant:daily' for j in existing if j.get('id')==c.get('daily_job_id') or j.get('declarationKey')=='zixin-wechat:daily-briefing'),'wechat-chat-assistant:daily')
-    install('preparation_job_id','微信晨报提前准备','wechat-chat-assistant:prepare','20 8 * * *',
-        [c['python'],str(brief_script),'--prepare'],1000)
-    install('daily_job_id','微信每日简报',daily_key,'0 9 * * *',
-        [c['python'],str(brief_script),'--deliver-ready'],300)
-    install('learning_job_id','微信语气与关系学习','wechat-chat-assistant:learning','30 5,11,17,23 * * *',
-        [c['python'],str(BASE/'app/memory_refresh.py')],300)
-    for key in ['preparation_job_id','daily_job_id']:
-        oc('cron','edit',c[key],'--failure-alert','--failure-alert-after','1',
-            '--failure-alert-channel','openclaw-weixin','--failure-alert-account-id',c['account'],
-            '--failure-alert-to',c['owner'],'--failure-alert-cooldown','1h',capture=True)
-    for key in ['preparation_job_id','daily_job_id','learning_job_id']:oc('cron','enable',c[key],capture=True)
-    return {k:c[k] for k in ['preparation_job_id','daily_job_id','learning_job_id']}
+    scheduler_root.mkdir(mode=0o700,parents=True,exist_ok=True)
+    with ExitStack() as stack:
+        for path in [BASE/'briefing.lock',scheduler_root/'worker.lock']:
+            lock=stack.enter_context(path.open('a'))
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('早报正在运行，请完成后再更新调度。')
+        jobs=oc('cron','list','--json',capture=True,timeout=30)['jobs']
+        previous=[j['id'] for j in jobs if j.get('id') in [c.get('preparation_job_id'),c.get('daily_job_id')] and j.get('enabled')]
+        learning=next((j for j in jobs if j.get('id')==c.get('learning_job_id') or j.get('declarationKey')=='wechat-chat-assistant:learning'),None)
+        created_learning=False
+        if learning is None:
+            learning=oc('cron','add','--name','微信语气与关系学习','--cron','30 5,11,17,23 * * *','--tz','Asia/Shanghai','--exact',
+                '--command-argv',json.dumps([c['python'],str(BASE/'app/memory_refresh.py')]),'--command-cwd',str(BASE/'app'),
+                '--command-env','WECHAT_ASSISTANT_HOME='+str(BASE),'--timeout-seconds','300','--no-deliver',
+                '--declaration-key','wechat-chat-assistant:learning','--disabled','--json',capture=True)
+            learning=learning.get('job',learning);c['learning_job_id']=learning['id'];created_learning=True
+            oc('cron','enable',learning['id'],capture=True)
+        else:c['learning_job_id']=learning['id']
+        c.update(brief_script=str(brief_script or c.get('brief_script',BASE/'app/daily_briefing.py')),
+            report_layout=c.get('report_layout','bound'),report_binding_mode=c.get('report_binding_mode','legacy4'))
+        try:
+            for job_id in previous:oc('cron','disable',job_id,capture=True)
+            write(CONFIG,c)
+            installed=install_agent(locked=True)
+            c.update(scheduler_backend='launchd',scheduler_label=installed['label'],scheduler_plist=installed['plist'])
+            write(CONFIG,c)
+        except BaseException:
+            if created_learning:oc('cron','disable',learning['id'],capture=True)
+            write(CONFIG,original)
+            for job_id in previous:oc('cron','enable',job_id,capture=True)
+            raise
+    return {'scheduler_backend':'launchd','scheduler_label':c['scheduler_label'],'learning_job_id':c['learning_job_id']}
 
 
 def install():
@@ -151,7 +164,8 @@ def install():
 def resume():
     c=config()
     if c.get('version')!=VERSION:
-        print('当前安装版本为 '+str(c.get('version','未知'))+'；恢复配置不会自动升级旧程序。请参阅更新说明。')
+        if not confirm('当前安装版本为 '+str(c.get('version','未知'))+'。更新到'+VERSION+'？只更新程序并备份旧程序，保留登录、密钥、任务状态和投递回执，不重新初始化微信。'):return
+        upgrade()
     if not c.get('account') or not c.get('owner'):
         connect()
     c=config()
@@ -159,8 +173,105 @@ def resume():
         if not confirm('现在继续聊天读取初始化？需要本人备份、退出微信并同意临时副本操作。'):return
         reader()
     if not config().get('reader_verified'):verify()
-    if confirm('继续真实模型检索与完整昨日简报试发，通过后启用08:20准备、09:00投递？这会使用订阅额度并向你发送测试简报。'):
-        activate()
+    if confirm('继续开启／修复09:00早报？已有同一账号的真实简报回执时直接修复调度；否则需要模型检索和完整试发，会使用订阅额度。'):
+        repair()
+
+
+def upgrade():
+    import fcntl
+    from contextlib import ExitStack
+    c=config()
+    if c.get('version')==VERSION:return
+    if SOURCE.resolve()==BASE.resolve():raise RuntimeError('请从新下载的配置应用启动程序更新。')
+    target=BASE/'code-backups'/datetime.now().strftime('%Y%m%d-%H%M%S-%f');target.mkdir(mode=0o700,parents=True)
+    stage=target/'new';stage.mkdir(mode=0o700)
+    locks=[BASE/'briefing.lock',BASE/'scheduler/worker.lock']
+    if c.get('key_file'):
+        digest=hashlib.sha256(json.dumps({k:c.get(k) for k in ('owner','account','self_id','db_root','key_file')},sort_keys=True).encode()).hexdigest()
+        locks.append(BASE/'memory'/digest/'learning.lock')
+    with ExitStack() as stack:
+        for path in locks:
+            path.parent.mkdir(mode=0o700,parents=True,exist_ok=True);lock=stack.enter_context(path.open('a'))
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('早报或学习正在运行，已保留旧程序；请结束后再更新。')
+        desired=json.loads((SOURCE/'package.json').read_text())
+        installed_plugins=None
+        for name,version in desired['dependencies'].items():
+            installed=BASE/'runtime/node_modules'/name/'package.json'
+            matched=installed.exists() and json.loads(installed.read_text()).get('version')==version
+            if not matched and name in ('@openclaw/codex','@tencent-weixin/openclaw-weixin'):
+                if installed_plugins is None:installed_plugins=oc('plugins','list','--json',capture=True,timeout=45).get('plugins',[])
+                plugin_id={'@openclaw/codex':'codex','@tencent-weixin/openclaw-weixin':'openclaw-weixin'}[name]
+                entry=next((p for p in installed_plugins if p.get('id')==plugin_id and p.get('version')==version and p.get('status')=='loaded'),None)
+                if entry:
+                    source=Path(entry['source']).resolve();scope=Path.home()/('.openclaw-'+c['profile'])/'npm'
+                    if source.is_file() and source.is_relative_to(scope):
+                        for parent in source.parents:
+                            if not parent.is_relative_to(scope):break
+                            manifest=parent/'package.json'
+                            if manifest.is_file():
+                                package=json.loads(manifest.read_text())
+                                if package.get('name')==name and package.get('version')==version:matched=True;break
+            if not matched:raise RuntimeError('依赖版本变化，需要单独迁移；未覆盖现有运行环境。')
+        shutil.copytree(SOURCE/'app',stage/'app',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+        write(target/'reader-config.json',c)
+        soul=BASE/'workspace/SOUL.md';old_soul=soul.read_bytes() if soul.exists() else None
+        if old_soul is not None:(target/'SOUL.md').write_bytes(old_soul);(target/'SOUL.md').chmod(0o600)
+        was_loaded=False
+        if c.get('scheduler_backend')=='launchd':
+            from scheduler import stop,agent_label
+            was_loaded=subprocess.run(['launchctl','print','gui/'+str(os.getuid())+'/'+agent_label()],capture_output=True).returncode==0
+            stop()
+        old_app_moved=False
+        try:
+            (BASE/'app').rename(target/'app');old_app_moved=True
+            (stage/'app').rename(BASE/'app')
+            marker='配置版本 '+VERSION
+            if old_soul is not None and marker not in old_soul.decode():
+                with soul.open('a') as stream:stream.write('\n'+marker+'：早报由独立本机调度器提前准备、08:00核对同步、09:00投递，唤醒后最迟中午补发。任务导入需主人预览确认；完成或取消事项不重开。原有权限限制保持有效。\n')
+            c['version']=VERSION;write(CONFIG,c)
+            if was_loaded:
+                from scheduler import install as install_agent
+                install_agent(locked=True)
+        except BaseException:
+            if old_app_moved:
+                if (BASE/'app').exists():(BASE/'app').rename(target/'failed-app')
+                (target/'app').rename(BASE/'app')
+            write(CONFIG,json.loads((target/'reader-config.json').read_text()))
+            if old_soul is not None:soul.write_bytes(old_soul)
+            if was_loaded:
+                from scheduler import install as install_agent
+                install_agent(locked=True)
+            raise
+    print('程序已更新，旧程序已备份；个人状态与回执保持原状。')
+
+
+def prior_real_delivery():
+    from scheduler import report_location
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    c=config()
+    for offset in range(1,9):
+        day=(datetime.now(ZoneInfo('Asia/Shanghai'))-timedelta(days=offset)).strftime('%Y-%m-%d')
+        folder,binding=report_location(c,day);path=folder/'status.json'
+        if not path.exists():continue
+        state=json.loads(path.read_text())
+        if state.get('binding')!=binding or state.get('status') not in ('sent','corrected_sent'):continue
+        for receipt in [*folder.glob('*receipt*.json'),*folder.glob('narrative-delivery-*.json')]:
+            value=json.loads(receipt.read_text())
+            if not value.get('dryRun') and value.get('payload',{}).get('deliveryStatus')=='sent':return True
+    return False
+
+
+def repair():
+    c=config()
+    if c.get('version')!=VERSION:
+        if not confirm('需要先更新程序到'+VERSION+'才能安装新的独立调度。保留个人状态并更新？'):return
+        upgrade();c=config()
+    if not c.get('reader_verified') or not c.get('original_app_confirmed'):raise RuntimeError('先完成聊天读取验证。')
+    if prior_real_delivery():
+        configure_schedules();print('已复用同一账号的真实试发回执，修复独立09:00调度；没有重复试发。')
+    else:activate()
 
 
 def connect():
@@ -273,8 +384,8 @@ def activate():
     # Preserve the canonical sent-day receipt even for trial runs.
     configure_schedules()
     with (BASE/'workspace/SOUL.md').open('a') as f:
-        f.write('\n真实读取、模型检索和完整简报试发已验证。08:20准备晨报、09:00尝试投递；学习独立运行（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
-    print('真实检索和完整试发已通过。08:20提前准备，09:00投递；学习独立运行。Mac必须开机联网。')
+        f.write('\n真实读取、模型检索和完整简报试发已验证。提前准备晨报、08:00核对同步、09:00尝试投递；学习独立运行（配置验证时间：'+datetime.now().isoformat()+'）。电脑离线或服务故障时不能保证准点送达。\n')
+    print('真实检索和完整试发已通过。独立调度提前准备，08:00核对同步，09:00投递；学习独立运行。Mac必须开机联网。')
 
 
 def pause_and_invalidate(reader=False):
@@ -285,6 +396,10 @@ def pause_and_invalidate(reader=False):
         except BlockingIOError:
             raise RuntimeError('简报正在处理；先等待它结束，再重新授权或初始化，避免中途切换账户。')
         c=config()
+        if c.get('scheduler_backend')=='launchd':
+            from scheduler import busy,stop
+            if busy():raise RuntimeError('早报工作进程正在处理，请结束后再更改账号。')
+            stop()
         for key in ['daily_job_id','preparation_job_id','learning_job_id']:
             if c.get(key):oc('cron','disable',c[key])
         oc('config','set','tools.deny','["*"]')
@@ -325,11 +440,24 @@ def doctor():
                 'next_run_ms':state.get('nextRunAtMs'),'last_error':state.get('lastError')}
         daily=checks['schedules']['daily_job_id']
         checks['briefing_enabled']=daily.get('enabled') if daily else False
-        for value in checks['schedules'].values():
+        for key,value in checks['schedules'].items():
+            if c.get('scheduler_backend')=='launchd' and key!='learning_job_id':continue
             if value and value.get('last_status')=='error':checks['warnings'].append('定时任务最近一次运行失败，请查看状态与本机日志。');break
     except Exception as error:
         checks['checks']['gateway']='unavailable';checks['briefing_enabled']=None
         checks['warnings'].append('未取得实时调度状态：'+str(error))
+    if c.get('scheduler_backend')=='launchd':
+        from scheduler import agent_label,report_location,job_state,load as scheduler_load
+        label=agent_label()
+        result=subprocess.run(['launchctl','print','gui/'+str(os.getuid())+'/'+label],capture_output=True,text=True,timeout=10)
+        loaded=result.returncode==0
+        checks['scheduler']={'backend':'launchd','loaded':loaded,'label':label,'status':scheduler_load(BASE/'scheduler/status.json')}
+        checks['briefing_enabled']=loaded and bool(c.get('reader_verified')) and bool(c.get('original_app_confirmed'))
+        report_day=(checked-timedelta(days=1)).strftime('%Y-%m-%d')
+        checks['scheduler']['jobs']=scheduler_load(job_state(c,report_day))
+        action=checks['scheduler']['status'].get('action')
+        if action in ('held','missed_window'):checks['warnings'].append('早报需要核对投递状态或已经超过自动补发窗口，不会盲目重发。')
+        if not loaded:checks['warnings'].append('独立早报服务未运行，请点击验证／修复。')
     if all(c.get(k) for k in ['db_root','self_id','owner','account']):
         fingerprint=hashlib.sha256(json.dumps({k:c[k] for k in ['db_root','self_id','owner','account']},sort_keys=True).encode()).hexdigest()
         memory_binding=hashlib.sha256(json.dumps({k:c.get(k) for k in ['owner','account','self_id','db_root','key_file']},sort_keys=True).encode()).hexdigest()
@@ -346,8 +474,10 @@ def doctor():
                 checks['observed_edits']=db.execute('SELECT count(*) FROM feedback').fetchone()[0]
             finally:db.close()
         day=(checked-timedelta(days=1)).strftime('%Y-%m-%d')
-        reports=BASE/'reports'/fingerprint/day
-        if not reports.exists():reports=BASE/'reports'/day
+        if c.get('scheduler_backend')=='launchd':reports=report_location(c,day)[0]
+        else:
+            reports=BASE/'reports'/fingerprint/day
+            if not reports.exists():reports=BASE/'reports'/day
         state=reports/'status.json'
         checks['latest_briefing']={'source_day':day,'status':'not_prepared'}
         if state.exists():
@@ -367,6 +497,10 @@ def uninstall():
     if not confirm('停止并卸载此独立profile的后台服务；保留本机聊天、密钥、配置和订阅登录文件，绝不自动删除个人数据。'):
         return
     c=config()
+    if c.get('scheduler_backend')=='launchd':
+        from scheduler import busy,stop
+        if busy():raise RuntimeError('早报正在运行，请结束后再卸载服务。')
+        stop(remove=True)
     for key in ['daily_job_id','preparation_job_id','learning_job_id']:
         if c.get(key):oc('cron','disable',c[key])
     oc('gateway','uninstall')
@@ -376,10 +510,10 @@ def uninstall():
 if __name__=='__main__':
     os.umask(0o077)
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('command',choices=['install','resume','connect','reader','verify','enable','doctor','uninstall'])
+    ap.add_argument('command',choices=['install','resume','upgrade','repair','connect','reader','verify','enable','doctor','uninstall'])
     try:
         args=ap.parse_args()
-        {'install':install,'resume':resume,'connect':connect,'reader':reader,'verify':verify,'enable':activate,'doctor':doctor,'uninstall':uninstall}[args.command]()
+        {'install':install,'resume':resume,'upgrade':upgrade,'repair':repair,'connect':connect,'reader':reader,'verify':verify,'enable':activate,'doctor':doctor,'uninstall':uninstall}[args.command]()
     except (Exception,KeyboardInterrupt) as error:
         print('未完成：'+str(error),file=sys.stderr)
         print('现有配置和数据保留。请参阅 docs/RECOVERY.md。',file=sys.stderr)

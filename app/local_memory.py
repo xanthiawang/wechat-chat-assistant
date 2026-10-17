@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bounded, local, source-backed memory. No daemon, embedding service or model API."""
-import hashlib,json,os,re,secrets,sqlite3,sys,time
+import fcntl,hashlib,json,os,re,secrets,sqlite3,sys,time
 from contextlib import contextmanager
 from pathlib import Path
 from history_reader import BASE,DB,load_key,zstd
@@ -21,18 +21,45 @@ def connect(c,timeout=20):
     CREATE TABLE IF NOT EXISTS facts(id TEXT PRIMARY KEY,subject TEXT,predicate TEXT,object TEXT,note TEXT,sources TEXT,status TEXT,at INTEGER);
     CREATE TABLE IF NOT EXISTS tasks(number INTEGER PRIMARY KEY AUTOINCREMENT,import_key TEXT UNIQUE,title TEXT NOT NULL,category TEXT NOT NULL,details TEXT NOT NULL,due_original TEXT NOT NULL,provenance TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',revision INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS task_events(number INTEGER PRIMARY KEY AUTOINCREMENT,task_number INTEGER NOT NULL,previous_status TEXT,status TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL,owner_input TEXT NOT NULL);
-    ''');return db
+    ''')
+    with (folder/'schema.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        columns={r[1] for r in db.execute('PRAGMA table_info(tasks)')}
+        missing=[name for name in ('contact','topic') if name not in columns]
+        if missing:
+            backup=folder/'before-task-contact-topic.sqlite'
+            if not backup.exists():
+                target=sqlite3.connect(backup)
+                try:db.backup(target)
+                finally:target.close()
+                backup.chmod(0o600)
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                for name in missing:db.execute('ALTER TABLE tasks ADD COLUMN '+name+" TEXT NOT NULL DEFAULT ''")
+                db.commit()
+            except BaseException:db.rollback();db.close();raise
+    return db
 
 def task_record(row):
     item=dict(row);item['id']=f'T{item.pop("number"):03d}'
     item['provenance']=json.loads(item['provenance']);item.pop('import_key',None)
     return item
 
-def import_tasks(items,expected):
+def duplicate_task(db,item):
+    normalize=lambda value:re.sub(r'\s+','',value).casefold()
+    for row in db.execute('SELECT * FROM tasks'):
+        if normalize(row['title'])!=normalize(item['title']):continue
+        if row['topic'] and item.get('topic') and normalize(row['topic'])!=normalize(item['topic']):continue
+        if row['contact'] and item.get('contact') and normalize(row['contact'])!=normalize(item['contact']):continue
+        return row
+    return None
+
+
+def import_tasks(items,expected,reviewed=False):
     """Local operator import only; not exposed to the model tool."""
     c=config()
     if fingerprint(c)!=fingerprint(expected):raise RuntimeError('Import account changed')
-    db=connect(c);added=[]
+    db=connect(c);added=[];duplicates=[]
     try:
         with transaction(db,c):
             for item in items:
@@ -41,19 +68,31 @@ def import_tasks(items,expected):
                 provenance=item['provenance'];path=Path(provenance['path'])
                 if hashlib.sha256(path.read_bytes()).hexdigest()!=provenance['sha256']:raise ValueError('Task source changed')
                 if not provenance.get('locator'):raise ValueError('Task source locator required')
+                if reviewed and not item.get('new_instance'):
+                    duplicate=duplicate_task(db,item)
+                    if duplicate:
+                        duplicates.append(f'T{duplicate["number"]:03d}');continue
                 key=item['import_key'];old=db.execute('SELECT * FROM tasks WHERE import_key=?',(key,)).fetchone()
                 if old:
                     # Never overwrite an owner-reported completion on reimport.
                     for field in ('title','category','details','due_original'):
                         if old[field]!=item[field]:raise ValueError('Source revision requires explicit reconciliation')
                     if json.loads(old['provenance'])!=provenance:raise ValueError('Source provenance changed')
+                    duplicates.append(f'T{old["number"]:03d}')
                     continue
+                old=None if reviewed and item.get('new_instance') else duplicate_task(db,item)
+                if old:
+                    duplicates.append(f'T{old["number"]:03d}');continue
+                status=item.get('owner_confirmed_status','open') if reviewed else 'open'
+                if status not in ('open','done'):raise ValueError('Import status must be explicitly reviewed')
+                contact=item.get('contact','');topic=item.get('topic','')
+                if len(contact)>200 or len(topic)>60 or '\n' in contact+topic:raise ValueError('Invalid task contact or topic')
                 now=int(time.time())
-                cursor=db.execute('INSERT INTO tasks(import_key,title,category,details,due_original,provenance,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
-                    (key,item['title'],item['category'],item['details'],item['due_original'],json.dumps(provenance,ensure_ascii=False),now,now))
-                db.execute('INSERT INTO task_events(task_number,previous_status,status,revision,at,owner_input) VALUES(?,NULL,\'open\',1,?,?)',(cursor.lastrowid,now,'owner-authorized source import; completion unverified'))
+                cursor=db.execute('INSERT INTO tasks(import_key,title,category,details,due_original,provenance,status,contact,topic,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    (key,item['title'],item['category'],item['details'],item['due_original'],json.dumps(provenance,ensure_ascii=False),status,contact,topic,now,now))
+                db.execute('INSERT INTO task_events(task_number,previous_status,status,revision,at,owner_input) VALUES(?,NULL,?,1,?,?)',(cursor.lastrowid,status,now,'owner reviewed import and initial status' if reviewed else 'owner-authorized source import; completion unverified'))
                 added.append(f'T{cursor.lastrowid:03d}')
-        return {'added':added,'total':db.execute('SELECT count(*) FROM tasks').fetchone()[0]}
+        return {'added':added,'duplicates':duplicates,'total':db.execute('SELECT count(*) FROM tasks').fetchone()[0]}
     finally:db.close()
 
 def task_list(db,value):
@@ -62,7 +101,7 @@ def task_list(db,value):
     query=value.get('query','');offset=max(0,int(value.get('offset',0)));limit=min(100,max(1,int(value.get('limit',30))))
     task_id=value.get('task_id','')
     if task_id and not re.fullmatch(r'T[0-9]{3,}',task_id,re.I):raise ValueError('Invalid task ID')
-    where="(?='all' OR status=?) AND instr(lower(title||' '||details),lower(?))>0 AND (?='' OR number=?)"
+    where="(?='all' OR status=?) AND instr(lower(title||' '||details||' '||contact||' '||topic),lower(?))>0 AND (?='' OR number=?)"
     args=(status,status,query,task_id,int(task_id[1:]) if task_id else -1)
     count=db.execute('SELECT count(*) FROM tasks WHERE '+where,args).fetchone()[0]
     rows=db.execute('SELECT * FROM tasks WHERE '+where+' ORDER BY number LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
@@ -72,8 +111,13 @@ def task_list(db,value):
 def match_task_subject(db,subject):
     normalize=lambda text:''.join(re.findall(r'\w',text.casefold()))
     key=normalize(subject)
-    rows=list(db.execute('SELECT number,title FROM tasks'))
-    exact=[row for row in rows if key and normalize(row['title'])==key]
+    rows=list(db.execute('SELECT number,title,contact,topic FROM tasks'))
+    def names(row):
+        values=[row['title']]
+        for name in (row['topic'],row['contact']):
+            if name:values.extend([name+row['title'],name+'的'+row['title']])
+        return values
+    exact=[row for row in rows if key and any(normalize(name)==key for name in names(row))]
     if exact:return exact
     if len(key)<4:return []
     return [row for row in rows

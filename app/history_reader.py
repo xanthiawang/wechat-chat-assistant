@@ -20,8 +20,8 @@ TZ = ZoneInfo('Asia/Shanghai')
 
 def binding_fingerprint(value=None):
     value=value or json.loads((BASE/'reader-config.json').read_text())
-    fields={k:value[k] for k in ['db_root','self_id','owner','account']}
-    return hashlib.sha256(json.dumps(fields,sort_keys=True).encode()).hexdigest()
+    from runtime_paths import binding_fingerprint as receipt_binding
+    return receipt_binding(value)
 
 
 def private_write(path, data):

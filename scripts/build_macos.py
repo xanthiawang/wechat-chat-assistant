@@ -23,7 +23,7 @@ def main():
         for source in files():
             dest=resources/source.relative_to(ROOT);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,dest)
         subprocess.run(['xcrun','swiftc','-swift-version','5','-parse-as-library','-O','-target','arm64-apple-macosx14.0',
-            str(ROOT/'native/AssistantApp.swift'),'-o',str(executable)],check=True)
+            str(ROOT/'native/AssistantApp.swift'),str(ROOT/'native/TaskImportView.swift'),'-o',str(executable)],check=True)
         info={'CFBundleIdentifier':'com.zixinwang.wechat-chat-assistant','CFBundleName':'WeChat Chat Assistant',
             'CFBundleDisplayName':'微信聊天助手','CFBundleExecutable':'WeChatAssistant','CFBundlePackageType':'APPL',
             'CFBundleShortVersionString':version,'CFBundleVersion':version,'LSMinimumSystemVersion':'14.0',

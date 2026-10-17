@@ -26,7 +26,14 @@ import AppKit
     var connected: Bool { configuration["account"] != nil && configuration["owner"] != nil }
     var reader: Bool { configuration["reader_verified"] as? Bool == true && configuration["original_app_confirmed"] as? Bool == true }
     var schedules: [String: Any] { status["schedules"] as? [String: Any] ?? [:] }
-    var daily: [String: Any] { schedules["daily_job_id"] as? [String: Any] ?? [:] }
+    var daily: [String: Any] {
+        if let controller=status["scheduler"] as? [String:Any] {
+            let tick=controller["status"] as? [String:Any] ?? [:]
+            let failed=["held","missed_window"].contains(tick["action"] as? String ?? "")
+            return ["enabled":status["briefing_enabled"] as? Bool ?? false,"last_status":failed ? "error" : "ok"]
+        }
+        return schedules["daily_job_id"] as? [String: Any] ?? [:]
+    }
     var dailyEnabled: Bool { daily["enabled"] as? Bool == true }
     var warnings: [String] { status["warnings"] as? [String] ?? [] }
     var sourceDay: String { (status["latest_briefing"] as? [String: Any])?["source_day"] as? String ?? "尚未检查" }
@@ -116,6 +123,7 @@ import AppKit
 
 struct AssistantView: View {
     @StateObject private var model = AssistantState()
+    @State private var importing = false
     private let accent = Color(red:0.05,green:0.48,blue:0.34)
     var body: some View {
         HStack(spacing:0) {
@@ -125,7 +133,7 @@ struct AssistantView: View {
                 Text("让聊天变成\n清楚的下一步。").font(.system(size:18,weight:.medium)).lineSpacing(5)
                 Text("聊天检索\n每日 09:00 简报\n待办与关系记忆").font(.system(size:13)).foregroundStyle(.secondary).lineSpacing(12)
                 Spacer()
-                Text("0.2.0 BETA · Apple Silicon").font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
+                Text("0.3.0 BETA · Apple Silicon").font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
                 Button("安装文档") { model.web("blob/main/docs/RECOVERY.md") }.buttonStyle(.link)
                 Button("隐私说明") { model.web("blob/main/SECURITY.md") }.buttonStyle(.link)
             }.padding(30).frame(width:235,alignment:.leading).background(Color(nsColor:.controlBackgroundColor))
@@ -142,7 +150,11 @@ struct AssistantView: View {
                     card("1", "安装与环境", "Homebrew、Python、Node 与独立后台服务。", model.installed ? "已有安装" : "待安装", model.installed, "开始／继续", "install")
                     card("2", "连接模型与微信", "本人登录订阅、微信扫码，并向机器人发送“你好”。", model.connected ? "已保存绑定" : "待连接", model.connected, "连接", "connect")
                     card("3", "接入聊天记录", "先完成官方备份；读取初始化需要单独确认。", model.reader ? "已保存读取验证" : "待验证", model.reader, "接入", "reader")
-                    card("4", "验证与开启早报", "真实检索与完整简报试发通过后，才启用定时任务。", model.dailyEnabled ? "已启用 09:00" : "尚未确认启用", model.dailyEnabled, "验证并启用", "enable")
+                    card("4", "验证与修复早报", "提前准备、08:00核对、09:00投递，唤醒后中午前补发。", model.dailyEnabled ? "已启用 09:00" : "尚未确认启用", model.dailyEnabled, "验证／修复", "repair")
+                    HStack {
+                        VStack(alignment:.leading,spacing:5) { Text("导入你的待办（可选）").fontWeight(.semibold);Text("粘贴或选文件，逐项核对联系人、项目和完成状态。").font(.caption).foregroundStyle(.secondary) }
+                        Spacer();Button("导入待办…") { importing=true }.disabled(model.readOnly || !model.reader || model.python()==nil)
+                    }.padding(15).overlay(RoundedRectangle(cornerRadius:12).stroke(Color(nsColor:.separatorColor).opacity(0.5)))
                     VStack(alignment:.leading,spacing:9) {
                         HStack { Text("运行状态").fontWeight(.semibold); Spacer(); Text(model.sourceDay).foregroundStyle(.secondary) }
                         Text("完整简报：" + model.reportState)
@@ -159,6 +171,9 @@ struct AssistantView: View {
                 }.padding(30)
             }
         }.frame(minWidth:960,minHeight:760).tint(accent)
+        .sheet(isPresented:$importing) {
+            TaskImportView(home:model.home,package:model.package,python:model.python() ?? "") { model.refresh() }
+        }
     }
     private func card(_ number:String,_ title:String,_ detail:String,_ badge:String,_ ready:Bool,_ action:String,_ command:String) -> some View {
         HStack(spacing:15) {

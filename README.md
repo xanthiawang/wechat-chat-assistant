@@ -2,12 +2,12 @@
 
 在微信里问聊天里的事，每天 09:00 收一份有联系人、有下一步的简报。
 
-**[下载 Mac 配置应用 · v0.2.0 Beta](https://github.com/xanthiawang/wechat-chat-assistant/releases/tag/v0.2.0)**
+**[下载 Mac 配置应用 · v0.3.0 Beta](https://github.com/xanthiawang/wechat-chat-assistant/releases/tag/v0.3.0)**
  · [四步配置](docs/QUICKSTART.md) · [功能与验证范围](docs/FEATURES.md) · [恢复与隐私](docs/RECOVERY.md)
 
 ## 下载后怎么用
 
-1. 下载 `WeChat-Chat-Assistant-0.2.0-arm64.dmg`，把“微信聊天助手”拖入 Applications。
+1. 下载 `WeChat-Chat-Assistant-0.3.0-arm64.dmg`，把“微信聊天助手”拖入 Applications。
 2. 打开应用，点“开始／继续”，按向导安装依赖。
 3. 连接本人的 ChatGPT/Codex 订阅，微信扫码，给机器人发“你好”。
 4. 完成微信官方备份并单独同意读取初始化；真实检索与完整简报试发通过后，开启每日 09:00 投递。
@@ -19,7 +19,7 @@
 也可下载源码 ZIP，解压后双击 `Install.command`；或者启动固定版本的终端向导：
 
 ```bash
-curl -fL https://github.com/xanthiawang/wechat-chat-assistant/releases/download/v0.2.0/install.sh -o /tmp/wechat-assistant-install-v0.2.0.sh && bash /tmp/wechat-assistant-install-v0.2.0.sh
+curl -fL https://github.com/xanthiawang/wechat-chat-assistant/releases/download/v0.3.0/install.sh -o /tmp/wechat-assistant-install-v0.3.0.sh && bash /tmp/wechat-assistant-install-v0.3.0.sh
 ```
 
 引导脚本下载固定版本并核对内置 SHA256；发布页另附所有资源的 `SHA256SUMS`。
@@ -29,7 +29,7 @@ curl -fL https://github.com/xanthiawang/wechat-chat-assistant/releases/download/
 | 功能 | 当前范围 |
 |---|---|
 | 微信问答 | 在本人 ClawBot 会话中检索此 Mac 已同步的文字 |
-| 每日简报 | 北京时间 08:20 准备，09:00 尝试投递前一天简报 |
+| 每日简报 | 独立本机调度，提前准备、08:00核对同步，09:00投递前一天简报 |
 | 待办 | 对已导入的有来源任务维护状态；本人确认完成后，从后续提醒中移除 |
 | 说话语气 | 检索同一联系人的真实本人表达，参考已关联的修改候选起草 |
 | 关系记忆 | 带原始消息来源的关系与项目候选，回复前仍需核对 |
@@ -52,9 +52,9 @@ curl -fL https://github.com/xanthiawang/wechat-chat-assistant/releases/download/
 
 在微信中说“查看待办”“某件事完成了”或“恢复某件事提醒”。也支持 `/todo done 完整事项名称`、`/todo reopen 完整事项名称`。模糊或同名事项先确认，不误改其他任务。
 
-当前持久待办需要先通过本机接口导入有来源的事项；尚未提供面向普通用户的导入界面或从所有聊天自动入库。每日简报仍可从当日聊天总结待处理事项，但不等于已经保存成跨日任务。
+在配置应用点击“导入待办”，粘贴清单或选择 TXT、Markdown、CSV、JSON 文件，预览并修改事项、联系人、项目、责任和日期，确认后保存。文件中的完成标记不会自行生效；由你在预览页确认。重复导入保留原记录及完成状态；同名独立事项可明确选择单独保存。不会自动把所有聊天里的建议写入持久待办。
 
-**电脑需开机、联网且服务可用。休眠、合盖、订阅额度不足、网关重启或微信会话失效都会影响准点发送。** 开启定时不代表成功送达，应用会显示最近一次真实运行状态；失败时可发送备用待办，发送结果不明时停止盲目重试。
+**电脑需开机、联网且服务可用。休眠、合盖、订阅额度不足、网关重启或微信会话失效都会影响准点发送。** 00:15后提前准备，08:00核对同步；失败有上限重试，成功模型批次复用，09:00后唤醒可在中午前补发。开启定时不代表成功送达，应用显示真实状态；生成失败可发送已存待办及失败提示，发送结果不明时停止盲目重试。
 
 ## 记忆如何工作
 
@@ -84,4 +84,4 @@ python3 scripts/build_release.py --macos
 
 发布只使用 `scripts/public_files.json` 明确列出的通用源码。源码归档规范化时间与权限；编译后的应用不宣称可重复构建。原生配置界面仅负责启动既有向导和读取状态，不复制 CodeIsland 的程序代码。
 
-源码 `main` 与下载包版本需分别核对；[v0.2.0 变化与限制](docs/RELEASE_NOTES_0.2.0.md)。已有旧安装不会自动覆盖升级，先按恢复文档保留原程序及个人状态。
+源码 `main` 与下载包版本需分别核对；[v0.3.0 变化与限制](docs/RELEASE_NOTES_0.2.0.md)。已有安装在“开始／继续”中明确确认升级，保留旧程序备份及个人记录；兼容检查不通过则停止。
